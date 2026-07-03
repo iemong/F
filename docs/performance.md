@@ -34,3 +34,19 @@ I/O:
 - [ ] 真のコールドキャッシュ（再起動直後/purge後）での確認
 - [ ] Phase 4 で os_signpost を Instruments から確認（signpost自体は実装済み）
 - [ ] キー送り16ms要件は CacheKit の先読み設計（Phase 5）で担保する
+
+## Phase 3: 最小UI（2026-07-04）
+
+アプリ実機計測（`LeicaSelect --folder samples --autotest`、Release、キャッシュなし逐次表示）。
+レイテンシ = ナビゲーション開始 → CAMetalLayer present 完了。
+
+| 機種 | 表示レイテンシ | 内訳: デコード | 内訳: テクスチャ+present |
+|---|---:|---:|---:|
+| M262 (11枚) | 267〜314ms | 238〜285ms | 約25〜40ms |
+| Q3 (10枚) | 67〜200ms | 36〜161ms | 約30〜45ms |
+
+- 全21枚 平均204ms / 最大313ms（先読みなしの素の値 = Phase 5 のベースライン）
+- Q3 は JpgFromRaw の ImageIO デコード（JPEGサイズ 1.4〜3.8MB に比例して36〜161ms）
+- M262 の decodebench との差分（デコード238ms vs 230ms）はRGBAコピーとアプリ環境分
+- 判明した罠: SwiftUI の状態更新で古いフレームが再presentされ計測が誤発火
+  → present通知にフレームidを付けて世代ガードで解決（コミット参照）

@@ -1,0 +1,285 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A11CE00000000000000000B1 /* DNGKit in Frameworks */ = {isa = PBXBuildFile; productRef = A11CE00000000000000000D1 /* DNGKit */; };
+		A11CE00000000000000000B2 /* DecodeKit in Frameworks */ = {isa = PBXBuildFile; productRef = A11CE00000000000000000D2 /* DecodeKit */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A11CE00000000000000000F1 /* LeicaSelect.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LeicaSelect.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		A11CE0000000000000000051 /* LeicaSelectApp */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = LeicaSelectApp;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A11CE0000000000000000041 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A11CE00000000000000000B1 /* DNGKit in Frameworks */,
+				A11CE00000000000000000B2 /* DecodeKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A11CE0000000000000000061 = {
+			isa = PBXGroup;
+			children = (
+				A11CE0000000000000000051 /* LeicaSelectApp */,
+				A11CE0000000000000000062 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A11CE0000000000000000062 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A11CE00000000000000000F1 /* LeicaSelect.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A11CE0000000000000000071 /* LeicaSelect */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A11CE0000000000000000082 /* Build configuration list for PBXNativeTarget "LeicaSelect" */;
+			buildPhases = (
+				A11CE0000000000000000042 /* Sources */,
+				A11CE0000000000000000041 /* Frameworks */,
+				A11CE0000000000000000043 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				A11CE0000000000000000051 /* LeicaSelectApp */,
+			);
+			name = LeicaSelect;
+			packageProductDependencies = (
+				A11CE00000000000000000D1 /* DNGKit */,
+				A11CE00000000000000000D2 /* DecodeKit */,
+			);
+			productName = LeicaSelect;
+			productReference = A11CE00000000000000000F1 /* LeicaSelect.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A11CE0000000000000000011 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1630;
+				LastUpgradeCheck = 1630;
+				TargetAttributes = {
+					A11CE0000000000000000071 = {
+						CreatedOnToolsVersion = 16.3;
+					};
+				};
+			};
+			buildConfigurationList = A11CE0000000000000000081 /* Build configuration list for PBXProject "LeicaSelect" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A11CE0000000000000000061;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A11CE00000000000000000C1 /* XCLocalSwiftPackageReference "Packages/DNGKit" */,
+				A11CE00000000000000000C2 /* XCLocalSwiftPackageReference "Packages/DecodeKit" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = A11CE0000000000000000062 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A11CE0000000000000000071 /* LeicaSelect */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A11CE0000000000000000043 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A11CE0000000000000000042 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A11CE0000000000000000091 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		A11CE0000000000000000092 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		A11CE0000000000000000093 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_HARDENED_RUNTIME = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = jp.iemong.LeicaSelect;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		A11CE0000000000000000094 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_HARDENED_RUNTIME = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = jp.iemong.LeicaSelect;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A11CE0000000000000000081 /* Build configuration list for PBXProject "LeicaSelect" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A11CE0000000000000000091 /* Debug */,
+				A11CE0000000000000000092 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A11CE0000000000000000082 /* Build configuration list for PBXNativeTarget "LeicaSelect" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A11CE0000000000000000093 /* Debug */,
+				A11CE0000000000000000094 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A11CE00000000000000000C1 /* XCLocalSwiftPackageReference "Packages/DNGKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/DNGKit;
+		};
+		A11CE00000000000000000C2 /* XCLocalSwiftPackageReference "Packages/DecodeKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/DecodeKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A11CE00000000000000000D1 /* DNGKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = DNGKit;
+		};
+		A11CE00000000000000000D2 /* DecodeKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = DecodeKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A11CE0000000000000000011 /* Project object */;
+}

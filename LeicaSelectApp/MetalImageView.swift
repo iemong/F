@@ -1,0 +1,242 @@
+import AppKit
+import DNGKit
+import Metal
+import QuartzCore
+import SwiftUI
+
+/// CAMetalLayer 直叩きの画像表示ビュー。
+/// アスペクトフィット + Orientation 回転をクアッドの頂点/UVで解決する
+struct MetalImageView: NSViewRepresentable {
+    let frame: DisplayFrame
+    /// 引数はpresentされたフレームのid（古いフレームの再描画と区別するため）
+    let onPresent: @MainActor (Int) -> Void
+
+    func makeNSView(context: Context) -> MetalLayerView {
+        MetalLayerView()
+    }
+
+    func updateNSView(_ view: MetalLayerView, context: Context) {
+        view.onPresent = onPresent
+        view.show(frame)
+    }
+}
+
+final class MetalLayerView: NSView {
+    private var renderer: QuadRenderer?
+    private var currentFrame: DisplayFrame?
+    var onPresent: (@MainActor (Int) -> Void)?
+
+    private var metalLayer: CAMetalLayer? { layer as? CAMetalLayer }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    override func makeBackingLayer() -> CALayer {
+        let layer = CAMetalLayer()
+        layer.pixelFormat = .bgra8Unorm
+        layer.framebufferOnly = true
+        layer.isOpaque = true
+        return layer
+    }
+
+    override var acceptsFirstResponder: Bool { false }
+
+    func show(_ frame: DisplayFrame) {
+        if renderer == nil {
+            renderer = QuadRenderer()
+            metalLayer?.device = renderer?.device
+        }
+        if currentFrame?.id != frame.id {
+            currentFrame = frame
+            renderer?.upload(frame)
+        }
+        render()
+    }
+
+    override func layout() {
+        super.layout()
+        updateDrawableSize()
+        render()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateDrawableSize()
+        render()
+    }
+
+    private func updateDrawableSize() {
+        guard let metalLayer else { return }
+        let scale = window?.backingScaleFactor ?? 2.0
+        metalLayer.contentsScale = scale
+        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        if size.width > 0, size.height > 0, metalLayer.drawableSize != size {
+            metalLayer.drawableSize = size
+        }
+    }
+
+    private func render() {
+        guard let renderer, let metalLayer, let frame = currentFrame,
+            metalLayer.drawableSize.width > 0
+        else { return }
+        let callback = onPresent
+        let frameID = frame.id
+        renderer.draw(into: metalLayer, orientation: frame.orientation) {
+            if let callback {
+                Task { @MainActor in callback(frameID) }
+            }
+        }
+    }
+}
+
+/// テクスチャ1枚をアスペクトフィットで描くだけの最小レンダラ
+@MainActor
+final class QuadRenderer {
+    let device: MTLDevice
+    private let commandQueue: MTLCommandQueue
+    private let pipelineState: MTLRenderPipelineState
+    private var texture: MTLTexture?
+
+    private static let shaderSource = """
+        #include <metal_stdlib>
+        using namespace metal;
+
+        struct VertexOut {
+            float4 position [[position]];
+            float2 uv;
+        };
+
+        vertex VertexOut quad_vertex(
+            uint vid [[vertex_id]],
+            constant float4 *vertices [[buffer(0)]]
+        ) {
+            VertexOut out;
+            float4 v = vertices[vid];
+            out.position = float4(v.xy, 0.0, 1.0);
+            out.uv = v.zw;
+            return out;
+        }
+
+        fragment float4 quad_fragment(
+            VertexOut in [[stage_in]],
+            texture2d<float> tex [[texture(0)]]
+        ) {
+            constexpr sampler s(mag_filter::linear, min_filter::linear);
+            return tex.sample(s, in.uv);
+        }
+        """
+
+    init?() {
+        guard let device = MTLCreateSystemDefaultDevice(),
+            let queue = device.makeCommandQueue(),
+            let library = try? device.makeLibrary(source: Self.shaderSource, options: nil),
+            let vertexFunction = library.makeFunction(name: "quad_vertex"),
+            let fragmentFunction = library.makeFunction(name: "quad_fragment")
+        else { return nil }
+
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = vertexFunction
+        descriptor.fragmentFunction = fragmentFunction
+        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        guard let state = try? device.makeRenderPipelineState(descriptor: descriptor) else {
+            return nil
+        }
+
+        self.device = device
+        self.commandQueue = queue
+        self.pipelineState = state
+    }
+
+    func upload(_ frame: DisplayFrame) {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: frame.pixelWidth,
+            height: frame.pixelHeight,
+            mipmapped: false)
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return }
+        frame.rgba.withUnsafeBytes { buffer in
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, frame.pixelWidth, frame.pixelHeight),
+                mipmapLevel: 0,
+                withBytes: buffer.baseAddress!,
+                bytesPerRow: frame.pixelWidth * 4)
+        }
+        self.texture = texture
+    }
+
+    func draw(
+        into layer: CAMetalLayer,
+        orientation: Orientation,
+        onPresent: @escaping @Sendable () -> Void
+    ) {
+        guard let texture,
+            let drawable = layer.nextDrawable(),
+            let commandBuffer = commandQueue.makeCommandBuffer()
+        else { return }
+
+        // 表示上の縦横（90度系は入れ替え）でアスペクトフィット
+        let imageWidth =
+            orientation.swapsDimensions ? CGFloat(texture.height) : CGFloat(texture.width)
+        let imageHeight =
+            orientation.swapsDimensions ? CGFloat(texture.width) : CGFloat(texture.height)
+        let drawableSize = layer.drawableSize
+        let scale = min(drawableSize.width / imageWidth, drawableSize.height / imageHeight)
+        let ndcWidth = Float(imageWidth * scale / drawableSize.width)
+        let ndcHeight = Float(imageHeight * scale / drawableSize.height)
+
+        // コーナー順: 左下・右下・左上・右上（triangle strip）
+        let uv = Self.cornerUVs(for: orientation)
+        var vertices: [SIMD4<Float>] = [
+            SIMD4(-ndcWidth, -ndcHeight, uv[0].x, uv[0].y),
+            SIMD4(ndcWidth, -ndcHeight, uv[1].x, uv[1].y),
+            SIMD4(-ndcWidth, ndcHeight, uv[2].x, uv[2].y),
+            SIMD4(ndcWidth, ndcHeight, uv[3].x, uv[3].y),
+        ]
+
+        let passDescriptor = MTLRenderPassDescriptor()
+        passDescriptor.colorAttachments[0].texture = drawable.texture
+        passDescriptor.colorAttachments[0].loadAction = .clear
+        passDescriptor.colorAttachments[0].storeAction = .store
+        passDescriptor.colorAttachments[0].clearColor = MTLClearColor(
+            red: 0, green: 0, blue: 0, alpha: 1)
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor)
+        else { return }
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setVertexBytes(
+            &vertices, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
+        encoder.setFragmentTexture(texture, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.endEncoding()
+
+        drawable.addPresentedHandler { _ in
+            onPresent()
+        }
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
+    }
+
+    /// EXIF Orientation → 画面コーナー（左下・右下・左上・右上）へのUV割り当て。
+    /// テクスチャは格納された向きのまま、UVの回転だけで正立表示にする
+    private static func cornerUVs(for orientation: Orientation) -> [SIMD2<Float>] {
+        switch orientation {
+        case .bottomRight: // 180°
+            [SIMD2(1, 0), SIMD2(0, 0), SIMD2(1, 1), SIMD2(0, 1)]
+        case .rightTop: // 90° CW（格納行0が表示右側、格納列0が表示上側）
+            [SIMD2(1, 1), SIMD2(1, 0), SIMD2(0, 1), SIMD2(0, 0)]
+        case .leftBottom: // 270° CW（格納行0が表示左側、格納列0が表示下側）
+            [SIMD2(0, 0), SIMD2(0, 1), SIMD2(1, 0), SIMD2(1, 1)]
+        default: // 正立（ミラー系は撮影では発生しないため正立扱い）
+            [SIMD2(0, 1), SIMD2(1, 1), SIMD2(0, 0), SIMD2(1, 0)]
+        }
+    }
+}

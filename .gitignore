@@ -6,6 +6,7 @@ samples/
 
 # Xcode / SPM
 .build/
+build/
 DerivedData/
 xcuserdata/
 *.xcuserstate
