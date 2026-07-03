@@ -70,6 +70,11 @@ public struct RawInfo: Sendable, Equatable {
     /// TIFF Compression 値。7 = lossless JPEG (LJ92)
     public let compression: Int
     public let byteRanges: [Range<Int>]
+    /// 2×2 CFA 配置（行優先）。0=R, 1=G, 2=B。Q3: [0,1,1,2]=RGGB / M262: [2,1,1,0]=BGGR
+    public let cfaPattern: [UInt8]
+    /// CFA 位置ごとのブラックレベル（4要素。スカラー指定は4要素に展開）
+    public let blackLevels: [Double]
+    public let whiteLevel: Int
 
     public var totalByteCount: Int { byteRanges.reduce(0) { $0 + $1.count } }
 }

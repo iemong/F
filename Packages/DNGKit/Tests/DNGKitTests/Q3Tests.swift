@@ -31,6 +31,25 @@ struct Q3Tests {
         #expect(raw.byteRanges == [2_993_086 ..< (2_993_086 + 19_859_155)])
     }
 
+    @Test func センサー色情報() throws {
+        let raw = try #require(file.raw)
+        #expect(raw.cfaPattern == [0, 1, 1, 2]) // RGGB
+        #expect(raw.blackLevels == [512, 512, 512, 512])
+        #expect(raw.whiteLevel == 16383)
+
+        let neutral = try #require(file.asShotNeutral)
+        #expect(neutral.count == 3)
+        #expect(abs(neutral[0] - 0.814638027) < 1e-6)
+        #expect(neutral[1] == 1.0)
+        #expect(abs(neutral[2] - 0.2952710496) < 1e-6)
+
+        let matrix = try #require(file.colorMatrix2)
+        #expect(matrix.count == 9)
+        #expect(abs(matrix[0] - 0.6602) < 1e-6)
+        #expect(abs(matrix[8] - 0.2922) < 1e-6)
+        #expect(abs(matrix[1] - (-0.0788)) < 1e-6) // SRATIONAL の負値
+    }
+
     @Test func プレビューは3つで面積降順() {
         #expect(file.previews.count == 3)
         let areas = file.previews.map(\.pixelSize.area)

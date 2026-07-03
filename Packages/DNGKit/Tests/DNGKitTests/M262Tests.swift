@@ -27,6 +27,21 @@ struct M262Tests {
         #expect(raw.byteRanges == [14_782 ..< (14_782 + 26_240_476)])
     }
 
+    @Test func センサー色情報() throws {
+        let raw = try #require(file.raw)
+        #expect(raw.cfaPattern == [2, 1, 1, 0]) // BGGR（Q3と逆）
+        #expect(raw.blackLevels == [0, 0, 0, 0]) // スカラー0が4要素に展開される
+        #expect(raw.whiteLevel == 15_000)
+
+        let neutral = try #require(file.asShotNeutral)
+        #expect(abs(neutral[0] - 0.4539007092) < 1e-6)
+        #expect(abs(neutral[2] - 0.7852760736) < 1e-6)
+
+        let matrix = try #require(file.colorMatrix2)
+        #expect(matrix.count == 9)
+        #expect(abs(matrix[0] - 0.6653) < 1e-6)
+    }
+
     @Test func プレビューは2つ() {
         #expect(file.previews.count == 2)
     }

@@ -11,6 +11,10 @@ public struct DNGFile: Sendable {
     /// ピクセル面積の降順
     public let previews: [PreviewDescriptor]
     public let raw: RawInfo?
+    /// 撮影時ホワイトバランスのニュートラル値（カメラRGB、G=1基準）
+    public let asShotNeutral: [Double]?
+    /// XYZ(D65)→カメラRGB の 3×3 行列（行優先9要素）
+    public let colorMatrix2: [Double]?
 
     private let fileData: Data
 
@@ -86,6 +90,12 @@ public struct DNGFile: Sendable {
         let orientationRaw = try ifd0[TIFFTag.orientation]?.uint(reader) ?? 1
         self.orientation = Orientation(rawValue: UInt16(clamping: orientationRaw)) ?? .topLeft
         self.raw = rawInfo
+
+        let neutral = try ifd0[TIFFTag.asShotNeutral]?.doubles(reader)
+        self.asShotNeutral = neutral?.count == 3 ? neutral : nil
+        let matrix = try ifd0[TIFFTag.colorMatrix2]?.doubles(reader)
+        self.colorMatrix2 = matrix?.count == 9 ? matrix : nil
+
         self.fileData = data
     }
 
@@ -164,11 +174,38 @@ public struct DNGFile: Sendable {
         guard offsets.count == counts.count, !offsets.isEmpty else { return nil }
         let ranges = zip(offsets, counts).map { Int($0) ..< Int($0) + Int($1) }
         guard ranges.allSatisfy({ $0.upperBound <= reader.count }) else { return nil }
+
+        let bits = Int(try ifd[TIFFTag.bitsPerSample]?.uint(reader) ?? 16)
+
+        // CFA 2×2 前提（両機種とも CFARepeatPatternDim = 2 2）
+        var cfa: [UInt8] = [0, 1, 1, 2]
+        if let entry = ifd[TIFFTag.cfaPattern], entry.count == 4 {
+            let values = try entry.uints(reader)
+            if values.count == 4 { cfa = values.map { UInt8(clamping: $0) } }
+        }
+
+        // BlackLevel はスカラーまたは CFA 位置ごとの4要素（RATIONAL の場合もある）
+        var blacks: [Double] = [0, 0, 0, 0]
+        if let entry = ifd[TIFFTag.blackLevel] {
+            let values = try entry.doubles(reader)
+            if values.count == 1 {
+                blacks = [Double](repeating: values[0], count: 4)
+            } else if values.count == 4 {
+                blacks = values
+            }
+        }
+
+        let white = try ifd[TIFFTag.whiteLevel]?.uint(reader).map(Int.init)
+            ?? ((1 << bits) - 1)
+
         return RawInfo(
             pixelSize: PixelSize(width: Int(w), height: Int(h)),
-            bitsPerSample: Int(try ifd[TIFFTag.bitsPerSample]?.uint(reader) ?? 16),
+            bitsPerSample: bits,
             compression: Int(try ifd[TIFFTag.compression]?.uint(reader) ?? 1),
-            byteRanges: ranges)
+            byteRanges: ranges,
+            cfaPattern: cfa,
+            blackLevels: blacks,
+            whiteLevel: white)
     }
 
     /// Leica MakerNotes: `LEICA\0` ヘッダ + 8バイト目から内部IFD（次IFDオフセットなし）。

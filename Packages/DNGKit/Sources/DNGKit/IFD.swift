@@ -14,8 +14,14 @@ enum TIFFTag {
     static let subIFDs: UInt16 = 0x014A
     static let jpegInterchangeFormat: UInt16 = 0x0201
     static let jpegInterchangeFormatLength: UInt16 = 0x0202
+    static let cfaRepeatPatternDim: UInt16 = 0x828D
+    static let cfaPattern: UInt16 = 0x828E
     static let exifIFD: UInt16 = 0x8769
     static let makerNote: UInt16 = 0x927C
+    static let colorMatrix2: UInt16 = 0xC622
+    static let asShotNeutral: UInt16 = 0xC628
+    static let blackLevel: UInt16 = 0xC61A
+    static let whiteLevel: UInt16 = 0xC61D
     /// Leica MakerNotes 内部IFDのプレビューJPEG
     static let leicaPreview: UInt16 = 0x0300
 
@@ -58,6 +64,39 @@ struct IFDEntry {
         values.reserveCapacity(count)
         for i in 0 ..< count {
             guard let v = try uint(reader, index: i) else { break }
+            values.append(v)
+        }
+        return values
+    }
+
+    /// RATIONAL/SRATIONAL/整数型の値を Double として読む
+    func double(_ reader: ByteReader, index: Int = 0) throws -> Double? {
+        guard index >= 0, index < count else { return nil }
+        switch type {
+        case 5: // RATIONAL
+            let num = try reader.u32(at: valueOffset + index * 8)
+            let den = try reader.u32(at: valueOffset + index * 8 + 4)
+            guard den != 0 else { return nil }
+            return Double(num) / Double(den)
+        case 10: // SRATIONAL
+            let num = Int32(bitPattern: try reader.u32(at: valueOffset + index * 8))
+            let den = Int32(bitPattern: try reader.u32(at: valueOffset + index * 8 + 4))
+            guard den != 0 else { return nil }
+            return Double(num) / Double(den)
+        case 8: // SSHORT
+            return Double(Int16(bitPattern: try reader.u16(at: valueOffset + index * 2)))
+        case 9: // SLONG
+            return Double(Int32(bitPattern: try reader.u32(at: valueOffset + index * 4)))
+        default:
+            return try uint(reader, index: index).map(Double.init)
+        }
+    }
+
+    func doubles(_ reader: ByteReader) throws -> [Double] {
+        var values: [Double] = []
+        values.reserveCapacity(count)
+        for i in 0 ..< count {
+            guard let v = try double(reader, index: i) else { break }
             values.append(v)
         }
         return values
