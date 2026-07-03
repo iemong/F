@@ -46,6 +46,13 @@ struct M262Tests {
         #expect(file.previews.count == 2)
     }
 
+    @Test func rawの一括読み込みはスライスと同内容() throws {
+        let sliced = try #require(file.rawData())
+        let contiguous = try #require(file.rawDataContiguous())
+        #expect(sliced == contiguous)
+        #expect(contiguous.count == 26_240_476)
+    }
+
     @Test func MakerNotesプレビュー() throws {
         let p = try #require(file.previews.first)
         #expect(p.kind == .midsize)
