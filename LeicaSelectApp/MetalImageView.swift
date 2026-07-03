@@ -7,24 +7,34 @@ import SwiftUI
 /// CAMetalLayer 直叩きの画像表示ビュー。
 /// アスペクトフィット + Orientation 回転をクアッドの頂点/UVで解決する
 struct MetalImageView: NSViewRepresentable {
-    let frame: DisplayFrame
-    /// 引数はpresentされたフレームのid（古いフレームの再描画と区別するため）
-    let onPresent: @MainActor (Int) -> Void
+    let presented: PresentedFrame
+    /// 引数は presentされたフレームのgeneration と実提示時刻（CACurrentMediaTime基準）。
+    /// generation は古いフレームの再描画と区別するために使う
+    let onPresent: @MainActor (Int, CFTimeInterval) -> Void
+    /// 生成された NSView をモデルへ渡す（キー送りヒット時に SwiftUI の
+    /// 更新サイクル1フレームを待たず直接描画するための経路）
+    let register: @MainActor (MetalLayerView) -> Void
 
     func makeNSView(context: Context) -> MetalLayerView {
-        MetalLayerView()
+        let view = MetalLayerView()
+        register(view)
+        return view
     }
 
     func updateNSView(_ view: MetalLayerView, context: Context) {
         view.onPresent = onPresent
-        view.show(frame)
+        view.show(presented)
     }
 }
 
 final class MetalLayerView: NSView {
     private var renderer: QuadRenderer?
-    private var currentFrame: DisplayFrame?
-    var onPresent: (@MainActor (Int) -> Void)?
+    private var currentFrame: PresentedFrame?
+    /// 同一世代・同一サイズの二重エンコードを防ぐ（直接描画とSwiftUI更新の重複で
+    /// drawableキューが飽和し、presentが1フレーム遅れるのを避ける）
+    private var renderedGeneration = -1
+    private var renderedSize = CGSize.zero
+    var onPresent: (@MainActor (Int, CFTimeInterval) -> Void)?
 
     private var metalLayer: CAMetalLayer? { layer as? CAMetalLayer }
 
@@ -48,14 +58,14 @@ final class MetalLayerView: NSView {
 
     override var acceptsFirstResponder: Bool { false }
 
-    func show(_ frame: DisplayFrame) {
+    func show(_ presented: PresentedFrame) {
         if renderer == nil {
             renderer = QuadRenderer()
             metalLayer?.device = renderer?.device
         }
-        if currentFrame?.id != frame.id {
-            currentFrame = frame
-            renderer?.upload(frame)
+        if currentFrame?.generation != presented.generation {
+            currentFrame = presented
+            renderer?.texture = presented.frame.texture
         }
         render()
     }
@@ -83,14 +93,21 @@ final class MetalLayerView: NSView {
     }
 
     private func render() {
-        guard let renderer, let metalLayer, let frame = currentFrame,
+        guard let renderer, let metalLayer, let presented = currentFrame,
             metalLayer.drawableSize.width > 0
         else { return }
+        if renderedGeneration == presented.generation,
+            renderedSize == metalLayer.drawableSize
+        {
+            return
+        }
+        renderedGeneration = presented.generation
+        renderedSize = metalLayer.drawableSize
         let callback = onPresent
-        let frameID = frame.id
-        renderer.draw(into: metalLayer, orientation: frame.orientation) {
+        let generation = presented.generation
+        renderer.draw(into: metalLayer, orientation: presented.frame.orientation) { presentedTime in
             if let callback {
-                Task { @MainActor in callback(frameID) }
+                Task { @MainActor in callback(generation, presentedTime) }
             }
         }
     }
@@ -102,7 +119,8 @@ final class QuadRenderer {
     let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
-    private var texture: MTLTexture?
+    /// 表示するテクスチャ（アップロード済みを直接受け取る）
+    var texture: (any MTLTexture)?
 
     private static let shaderSource = """
         #include <metal_stdlib>
@@ -134,7 +152,7 @@ final class QuadRenderer {
         """
 
     init?() {
-        guard let device = MTLCreateSystemDefaultDevice(),
+        guard let device = GPUContext.shared.device,
             let queue = device.makeCommandQueue(),
             let library = try? device.makeLibrary(source: Self.shaderSource, options: nil),
             let vertexFunction = library.makeFunction(name: "quad_vertex"),
@@ -154,29 +172,10 @@ final class QuadRenderer {
         self.pipelineState = state
     }
 
-    func upload(_ frame: DisplayFrame) {
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba8Unorm,
-            width: frame.pixelWidth,
-            height: frame.pixelHeight,
-            mipmapped: false)
-        descriptor.usage = .shaderRead
-        descriptor.storageMode = .shared
-        guard let texture = device.makeTexture(descriptor: descriptor) else { return }
-        frame.rgba.withUnsafeBytes { buffer in
-            texture.replace(
-                region: MTLRegionMake2D(0, 0, frame.pixelWidth, frame.pixelHeight),
-                mipmapLevel: 0,
-                withBytes: buffer.baseAddress!,
-                bytesPerRow: frame.pixelWidth * 4)
-        }
-        self.texture = texture
-    }
-
     func draw(
         into layer: CAMetalLayer,
         orientation: Orientation,
-        onPresent: @escaping @Sendable () -> Void
+        onPresent: @escaping @Sendable (CFTimeInterval) -> Void
     ) {
         guard let texture,
             let drawable = layer.nextDrawable(),
@@ -218,8 +217,8 @@ final class QuadRenderer {
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
 
-        drawable.addPresentedHandler { _ in
-            onPresent()
+        drawable.addPresentedHandler { presented in
+            onPresent(presented.presentedTime)
         }
         commandBuffer.present(drawable)
         commandBuffer.commit()

@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		A11CE00000000000000000B1 /* DNGKit in Frameworks */ = {isa = PBXBuildFile; productRef = A11CE00000000000000000D1 /* DNGKit */; };
 		A11CE00000000000000000B2 /* DecodeKit in Frameworks */ = {isa = PBXBuildFile; productRef = A11CE00000000000000000D2 /* DecodeKit */; };
+		A11CE00000000000000000B3 /* CacheKit in Frameworks */ = {isa = PBXBuildFile; productRef = A11CE00000000000000000D3 /* CacheKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +31,7 @@
 			files = (
 				A11CE00000000000000000B1 /* DNGKit in Frameworks */,
 				A11CE00000000000000000B2 /* DecodeKit in Frameworks */,
+				A11CE00000000000000000B3 /* CacheKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -74,6 +76,7 @@
 			packageProductDependencies = (
 				A11CE00000000000000000D1 /* DNGKit */,
 				A11CE00000000000000000D2 /* DecodeKit */,
+				A11CE00000000000000000D3 /* CacheKit */,
 			);
 			productName = LeicaSelect;
 			productReference = A11CE00000000000000000F1 /* LeicaSelect.app */;
@@ -106,6 +109,7 @@
 			packageReferences = (
 				A11CE00000000000000000C1 /* XCLocalSwiftPackageReference "Packages/DNGKit" */,
 				A11CE00000000000000000C2 /* XCLocalSwiftPackageReference "Packages/DecodeKit" */,
+				A11CE00000000000000000C3 /* XCLocalSwiftPackageReference "Packages/CacheKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A11CE0000000000000000062 /* Products */;
@@ -268,6 +272,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/DecodeKit;
 		};
+		A11CE00000000000000000C3 /* XCLocalSwiftPackageReference "Packages/CacheKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/CacheKit;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -278,6 +286,10 @@
 		A11CE00000000000000000D2 /* DecodeKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = DecodeKit;
+		};
+		A11CE00000000000000000D3 /* CacheKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = CacheKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

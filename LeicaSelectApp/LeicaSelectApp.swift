@@ -27,10 +27,12 @@ struct ContentView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            if let frame = model.currentFrame {
-                MetalImageView(frame: frame) { id in
-                    model.frameDidPresent(id: id)
-                }
+            if let presented = model.currentFrame {
+                MetalImageView(
+                    presented: presented,
+                    onPresent: { id, time in model.frameDidPresent(id: id, presentedTime: time) },
+                    register: { view in model.registerRenderView(view) }
+                )
                 .ignoresSafeArea()
             } else {
                 VStack(spacing: 12) {

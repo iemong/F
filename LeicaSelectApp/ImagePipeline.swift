@@ -4,10 +4,8 @@ import DecodeKit
 import Foundation
 import ImageIO
 
-/// 表示直前まで準備できたフレーム。テクスチャ化はレンダラ（メインスレッド）で行う
-struct DisplayFrame: Sendable, Identifiable {
-    /// ナビゲーション世代。テクスチャ再アップロード判定にも使う
-    let id: Int
+/// デコード済みのCPU側フレーム。テクスチャ化は TextureFactory が行う
+struct DisplayFrame: Sendable {
     let pixelWidth: Int
     let pixelHeight: Int
     /// RGBA8888 row-major
@@ -26,7 +24,7 @@ enum ImagePipelineError: Error {
 /// - 原寸級JPEG内蔵（Q3）→ 抽出して ImageIO でデコード
 /// - それ以外（M262）→ LJ92 + ハーフサイズ縮約
 enum ImagePipeline {
-    static func loadDisplayFrame(from url: URL, id: Int) throws -> DisplayFrame {
+    static func loadDisplayFrame(from url: URL) throws -> DisplayFrame {
         let clock = ContinuousClock()
         let start = clock.now
 
@@ -36,7 +34,6 @@ enum ImagePipeline {
             let decoded = decodeJPEGToRGBA(file.previewData(preview))
         {
             return DisplayFrame(
-                id: id,
                 pixelWidth: decoded.width,
                 pixelHeight: decoded.height,
                 rgba: decoded.pixels,
@@ -47,7 +44,6 @@ enum ImagePipeline {
 
         let image = try DNGDecoder.halfSizeImage(from: file)
         return DisplayFrame(
-            id: id,
             pixelWidth: image.width,
             pixelHeight: image.height,
             rgba: image.pixels,
