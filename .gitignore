@@ -1,0 +1,12 @@
+# 実機DNGサンプル（大容量・個人写真のためgit管理外。テストはローカル参照）
+samples/
+
+# Claude Code ローカル作業ディレクトリ（タスク管理・スクラッチパッド）
+.claude/
+
+# Xcode / SPM
+.build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+.DS_Store
