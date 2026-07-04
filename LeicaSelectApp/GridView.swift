@@ -1,5 +1,41 @@
 import SwiftUI
 
+/// カラーラベルの表示ヘルパー
+enum LabelColorStyle {
+    static func color(_ label: String) -> Color {
+        switch label {
+        case "Red": .red
+        case "Yellow": .yellow
+        case "Green": .green
+        case "Blue": .blue
+        default: .purple
+        }
+    }
+
+    static func displayName(_ label: String) -> String {
+        switch label {
+        case "Red": "赤"
+        case "Yellow": "黄"
+        case "Green": "緑"
+        case "Blue": "青"
+        default: label
+        }
+    }
+}
+
+extension View {
+    /// Liquid Glass パネル（macOS 26+）。旧OSはマテリアルにフォールバック
+    @ViewBuilder
+    func glassPanel(cornerRadius: CGFloat = 10) -> some View {
+        if #available(macOS 26.0, *) {
+            self.glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+        } else {
+            self.background(
+                .ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
+        }
+    }
+}
+
 /// サムネイルグリッド。セルは遅延生成（表示された分だけデコード）
 struct GridView: View {
     let model: AppModel
@@ -16,11 +52,12 @@ struct GridView: View {
                             repeating: GridItem(.flexible(), spacing: 8), count: columns),
                         spacing: 8
                     ) {
-                        ForEach(Array(model.files.enumerated()), id: \.element) { index, url in
+                        ForEach(Array(model.visibleFiles.enumerated()), id: \.element) { index, url in
                             ThumbnailCell(
                                 url: url,
                                 isSelected: index == model.currentIndex,
                                 rating: model.ratings[url] ?? 0,
+                                label: model.labels[url],
                                 provider: model.thumbnails
                             )
                             .id(url)
@@ -36,8 +73,8 @@ struct GridView: View {
                     .padding(8)
                 }
                 .onChange(of: model.currentIndex) { _, newIndex in
-                    guard model.files.indices.contains(newIndex) else { return }
-                    proxy.scrollTo(model.files[newIndex])
+                    guard model.visibleFiles.indices.contains(newIndex) else { return }
+                    proxy.scrollTo(model.visibleFiles[newIndex])
                 }
             }
             .onAppear { model.gridColumns = columns }
@@ -51,6 +88,7 @@ struct ThumbnailCell: View {
     let url: URL
     let isSelected: Bool
     let rating: Int
+    let label: String?
     let provider: ThumbnailProvider
 
     @State private var thumbnail: ThumbImage?
@@ -72,6 +110,11 @@ struct ThumbnailCell: View {
                 .clipped()
 
             HStack(spacing: 6) {
+                if let label {
+                    Circle()
+                        .fill(LabelColorStyle.color(label))
+                        .frame(width: 8, height: 8)
+                }
                 if rating == -1 {
                     Text("✕")
                         .foregroundStyle(.red)
@@ -80,12 +123,13 @@ struct ThumbnailCell: View {
                         .foregroundStyle(.yellow)
                 }
                 Text(url.lastPathComponent)
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.white.opacity(0.85))
                     .lineLimit(1)
             }
             .font(.system(size: 10, weight: .medium, design: .monospaced))
-            .padding(4)
-            .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 4))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .glassPanel(cornerRadius: 5)
             .padding(4)
         }
         .overlay(

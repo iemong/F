@@ -23,6 +23,31 @@ struct FrameKey: Hashable, Sendable {
     let full: Bool
 }
 
+/// SDカード等の外部ボリューム
+struct RemovableVolume: Identifiable, Equatable {
+    let url: URL
+    let name: String
+    var id: URL { url }
+}
+
+/// グリッド/送り対象の絞り込み条件
+struct FilterState: Equatable {
+    /// 0 = 無効。1-5 = そのレート以上のみ（除外(-1)も落ちる）
+    var minRating = 0
+    var hideRejected = false
+    /// 特定カラーラベルのみ（nil = 無効）
+    var label: String?
+
+    var isActive: Bool { minRating > 0 || hideRejected || label != nil }
+}
+
+/// カラーラベル（Lightroom互換のxmp:Label値とキー割当 6-9）
+enum ColorLabel {
+    static let all: [(key: String, value: String)] = [
+        ("6", "Red"), ("7", "Yellow"), ("8", "Green"), ("9", "Blue"),
+    ]
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -35,11 +60,39 @@ final class AppModel {
     private(set) var zoomMode: ZoomMode = .fit
     /// グリッドの列数（ビュー側のレイアウトから通知される。上下キー移動に使う）
     var gridColumns = 5
+    private(set) var currentFolder: URL?
+    /// マウント中のSDカード等（NSWorkspaceの通知で更新）
+    private(set) var removableVolumes: [RemovableVolume] = []
+    private(set) var recentFolders: [URL] = []
+
+    var windowTitle: String {
+        currentFolder?.lastPathComponent ?? "LeicaSelect"
+    }
     /// URL → レート（1-5、-1=除外。0/未登録=なし）。XMPサイドカーと同期
     private(set) var ratings: [URL: Int] = [:]
+    /// URL → カラーラベル（"Red"等）。XMPサイドカーと同期
+    private(set) var labels: [URL: String] = [:]
+    private(set) var filter = FilterState()
+
+    /// フィルター適用後の表示・送り対象。グリッドとナビゲーションはこちらを使う
+    var visibleFiles: [URL] {
+        guard filter.isActive else { return files }
+        return files.filter { passesFilter($0) }
+    }
+
+    private func passesFilter(_ url: URL) -> Bool {
+        let rating = ratings[url] ?? 0
+        if filter.hideRejected, rating == -1 { return false }
+        if filter.minRating > 0, rating < filter.minRating { return false }
+        if let wanted = filter.label, labels[url] != wanted { return false }
+        return true
+    }
 
     var positionText: String {
-        files.isEmpty ? "" : "\(currentIndex + 1)/\(files.count)"
+        let visible = visibleFiles
+        guard !visible.isEmpty || filter.isActive else { return "" }
+        let base = visible.isEmpty ? "0/0" : "\(currentIndex + 1)/\(visible.count)"
+        return filter.isActive ? base + " (全\(files.count))" : base
     }
 
     var fileNameText: String {
@@ -58,7 +111,32 @@ final class AppModel {
     }
 
     var currentURL: URL? {
-        files.indices.contains(currentIndex) ? files[currentIndex] : nil
+        let visible = visibleFiles
+        return visible.indices.contains(currentIndex) ? visible[currentIndex] : nil
+    }
+
+    var currentLabel: String? {
+        currentURL.flatMap { labels[$0] }
+    }
+
+    /// フィルター変更。選択中のファイルが残っていれば選択を維持する
+    func setFilter(_ newFilter: FilterState) {
+        guard newFilter != filter else { return }
+        let selected = currentURL
+        filter = newFilter
+        let visible = visibleFiles
+        if let selected, let index = visible.firstIndex(of: selected) {
+            currentIndex = index
+        } else {
+            currentIndex = min(max(0, currentIndex), max(0, visible.count - 1))
+            if viewMode == .single {
+                if visible.isEmpty {
+                    viewMode = .grid
+                } else {
+                    loadCurrent()
+                }
+            }
+        }
     }
 
     /// グリッドのサムネイル供給（LRU 320MB）
@@ -111,6 +189,10 @@ final class AppModel {
     /// --autotest       全ファイルを往復自動送り（往路=先読み込み、復路=全ヒット）して
     ///                  レイテンシを標準出力へ、完了後に終了
     func bootstrap() {
+        refreshRemovableVolumes()
+        observeVolumeChanges()
+        loadRecentFolders()
+
         let arguments = CommandLine.arguments
         isAutotest = arguments.contains("--autotest")
         if let flagIndex = arguments.firstIndex(of: "--folder"),
@@ -130,20 +212,61 @@ final class AppModel {
         loadFolder(url)
     }
 
+    /// 最近使ったフォルダ・ボリュームメニューからの遷移
+    func openFolder(at url: URL) {
+        loadFolder(url)
+    }
+
+    /// SDカード等のボリュームを開く。DCIM があればそちらを起点にする
+    func openVolume(_ volume: RemovableVolume) {
+        let dcim = volume.url.appendingPathComponent("DCIM", isDirectory: true)
+        let target =
+            FileManager.default.fileExists(atPath: dcim.path) ? dcim : volume.url
+        loadFolder(target)
+    }
+
     private func loadFolder(_ url: URL) {
-        let contents =
-            (try? FileManager.default.contentsOfDirectory(
-                at: url, includingPropertiesForKeys: nil)) ?? []
-        files = contents
-            .filter { $0.pathExtension.uppercased() == "DNG" }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        currentFolder = url
+        files = []
         currentIndex = 0
         currentFrame = nil
-        statusText = files.isEmpty ? "DNGが見つかりません" : ""
         latencyText = ""
         ratings = [:]
+        labels = [:]
+        filter = FilterState()
         zoomMode = .fit
+        statusText = "読み込み中…"
+
+        // SDカードは DCIM/100LEICA/ のようにサブフォルダに入るため再帰で探す。
+        // 大きいツリーやUSB越しでも固まらないよう列挙はバックグラウンド
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let found = Self.findDNGs(in: url)
+            await self?.applyFolderContents(found, for: url)
+        }
+    }
+
+    /// 再帰的にDNGを列挙（隠しファイル・パッケージ内は除外、上限1万件）
+    private nonisolated static func findDNGs(in root: URL) -> [URL] {
+        var result: [URL] = []
+        let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants])
+        while let item = enumerator?.nextObject() as? URL {
+            if item.pathExtension.uppercased() == "DNG" {
+                result.append(item)
+                if result.count >= 10_000 { break }
+            }
+        }
+        return result.sorted { $0.path < $1.path }
+    }
+
+    private func applyFolderContents(_ found: [URL], for url: URL) {
+        guard currentFolder == url else { return } // 列挙中に別フォルダへ移動した
+        files = found
+        statusText = files.isEmpty ? "DNGが見つかりません" : ""
         if !files.isEmpty {
+            addRecentFolder(url)
             // 仕様: フォルダを開く → サムネグリッド（autotestは1枚表示で計測）
             if isAutotest {
                 viewMode = .single
@@ -155,28 +278,85 @@ final class AppModel {
         }
     }
 
-    /// 既存XMPサイドカーからレートを復元する
-    private func restoreRatings(for urls: [URL]) {
-        Task.detached(priority: .utility) { [weak self] in
-            var restored: [URL: Int] = [:]
-            for url in urls {
-                if let rating = XMPSidecar.readRating(forImageAt: url), rating != 0 {
-                    restored[url] = rating
-                }
-            }
-            guard !restored.isEmpty else { return }
-            await self?.applyRestoredRatings(restored, expecting: urls)
+    // MARK: - ボリューム / 最近使ったフォルダ
+
+    private func refreshRemovableVolumes() {
+        let keys: [URLResourceKey] = [
+            .volumeNameKey, .volumeIsRemovableKey, .volumeIsEjectableKey, .volumeIsInternalKey,
+        ]
+        let urls =
+            FileManager.default.mountedVolumeURLs(
+                includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
+        removableVolumes = urls.compactMap { url in
+            guard let values = try? url.resourceValues(forKeys: Set(keys)) else { return nil }
+            let external =
+                (values.volumeIsRemovable ?? false)
+                || (values.volumeIsEjectable ?? false)
+                || !(values.volumeIsInternal ?? true)
+            guard external else { return nil }
+            return RemovableVolume(url: url, name: values.volumeName ?? url.lastPathComponent)
         }
     }
 
-    private func applyRestoredRatings(_ restored: [URL: Int], expecting urls: [URL]) {
+    private func observeVolumeChanges() {
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.refreshRemovableVolumes() }
+            }
+        }
+    }
+
+    private static let recentFoldersKey = "recentFolders"
+
+    private func loadRecentFolders() {
+        let paths = UserDefaults.standard.stringArray(forKey: Self.recentFoldersKey) ?? []
+        recentFolders = paths
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private func addRecentFolder(_ url: URL) {
+        var recents = recentFolders.filter { $0 != url }
+        recents.insert(url, at: 0)
+        recentFolders = Array(recents.prefix(5))
+        UserDefaults.standard.set(
+            recentFolders.map(\.path), forKey: Self.recentFoldersKey)
+    }
+
+    /// 既存XMPサイドカーからレートとラベルを復元する
+    private func restoreRatings(for urls: [URL]) {
+        Task.detached(priority: .utility) { [weak self] in
+            var restoredRatings: [URL: Int] = [:]
+            var restoredLabels: [URL: String] = [:]
+            for url in urls {
+                if let rating = XMPSidecar.readRating(forImageAt: url), rating != 0 {
+                    restoredRatings[url] = rating
+                }
+                if let label = XMPSidecar.readLabel(forImageAt: url) {
+                    restoredLabels[url] = label
+                }
+            }
+            guard !restoredRatings.isEmpty || !restoredLabels.isEmpty else { return }
+            await self?.applyRestoredMetadata(
+                ratings: restoredRatings, labels: restoredLabels, expecting: urls)
+        }
+    }
+
+    private func applyRestoredMetadata(
+        ratings restoredRatings: [URL: Int],
+        labels restoredLabels: [URL: String],
+        expecting urls: [URL]
+    ) {
         guard files == urls else { return } // 復元中に別フォルダへ移動していたら破棄
-        ratings.merge(restored) { current, _ in current } // セッション中の変更を優先
+        ratings.merge(restoredRatings) { current, _ in current } // セッション中の変更を優先
+        labels.merge(restoredLabels) { current, _ in current }
     }
 
     func navigate(_ delta: Int) {
-        guard !files.isEmpty else { return }
-        let newIndex = min(max(currentIndex + delta, 0), files.count - 1)
+        let visible = visibleFiles
+        guard !visible.isEmpty else { return }
+        let newIndex = min(max(currentIndex + delta, 0), visible.count - 1)
         guard newIndex != currentIndex else { return }
         currentIndex = newIndex
 
@@ -184,7 +364,7 @@ final class AppModel {
         guard viewMode == .single else { return }
 
         // ホットミラーにあれば同一ランループで表示確定（先読みヒットの高速経路）
-        let url = files[currentIndex]
+        let url = visible[currentIndex]
         if let hot = hotFrames[url] {
             generation += 1
             navigationStart = ContinuousClock.now
@@ -213,19 +393,19 @@ final class AppModel {
 
     /// グリッド: 上下キーで1行分移動
     func moveSelectionVertically(_ rows: Int) {
-        guard viewMode == .grid, !files.isEmpty else { return }
-        let newIndex = min(max(currentIndex + rows * gridColumns, 0), files.count - 1)
+        guard viewMode == .grid, !visibleFiles.isEmpty else { return }
+        let newIndex = min(max(currentIndex + rows * gridColumns, 0), visibleFiles.count - 1)
         currentIndex = newIndex
     }
 
     func select(_ index: Int) {
-        guard files.indices.contains(index) else { return }
+        guard visibleFiles.indices.contains(index) else { return }
         currentIndex = index
     }
 
     /// グリッドから1枚表示へ
     func openSelected() {
-        guard !files.isEmpty else { return }
+        guard !visibleFiles.isEmpty else { return }
         viewMode = .single
         loadCurrent()
     }
@@ -276,17 +456,41 @@ final class AppModel {
         renderView?.show(presented)
     }
 
-    /// レートキーの処理。"1"-"5"=レート / "0"=クリア / "x"=除外トグル
+    /// レート/ラベルキーの処理。
+    /// "1"-"5"=レート / "0"=クリア / "x"=除外トグル / "6"-"9"=カラーラベルトグル
     func handleRatingKey(_ characters: String) {
-        switch characters.lowercased() {
+        let key = characters.lowercased()
+        switch key {
         case "1", "2", "3", "4", "5":
             applyRating(Int(characters)!)
         case "0":
             applyRating(0)
         case "x":
             applyRating(-1)
+        case "6", "7", "8", "9":
+            if let label = ColorLabel.all.first(where: { $0.key == key })?.value {
+                applyLabel(label)
+            }
         default:
             break
+        }
+    }
+
+    /// カラーラベルを適用（同じ色を再指定でトグル解除）してサイドカーへ書き込み
+    private func applyLabel(_ label: String) {
+        guard let url = currentURL else { return }
+        let new: String? = labels[url] == label ? nil : label
+        if let new {
+            labels[url] = new
+        } else {
+            labels.removeValue(forKey: url)
+        }
+        Task.detached(priority: .utility) { [weak self] in
+            do {
+                try XMPSidecar.writeLabel(new, forImageAt: url)
+            } catch {
+                await self?.reportRatingError(error, for: url)
+            }
         }
     }
 
@@ -336,8 +540,9 @@ final class AppModel {
     }
 
     private func loadCurrent() {
-        guard files.indices.contains(currentIndex) else { return }
-        let url = files[currentIndex]
+        let visible = visibleFiles
+        guard visible.indices.contains(currentIndex) else { return }
+        let url = visible[currentIndex]
         generation += 1
         let requested = generation
         navigationStart = ContinuousClock.now
@@ -374,8 +579,8 @@ final class AppModel {
             statusText = ""
             renderView?.show(presented)
             lastWorkMS = (CACurrentMediaTime() - navigationStartMedia) * 1000
-            if files.indices.contains(currentIndex) {
-                storeHotFrame(frame, for: files[currentIndex])
+            if let url = currentURL {
+                storeHotFrame(frame, for: url)
             }
             if zoomMode == .actualSize {
                 ensureFullResolution()
@@ -388,15 +593,16 @@ final class AppModel {
     /// 前方2枚・後方1枚を先読みし、対象外のプリフェッチはキャンセルする。
     /// 完了したフレームは MainActor 側のホットミラーにも載せる
     private func schedulePrefetch() async {
-        guard !files.isEmpty else { return }
+        let visible = visibleFiles
+        guard !visible.isEmpty else { return }
         // 前方優先の順序で並べる
         let candidates = [currentIndex + 1, currentIndex - 1, currentIndex + 2]
-            .filter { files.indices.contains($0) }
-        let keep = Set(candidates.map { FrameKey(url: files[$0], full: false) })
+            .filter { visible.indices.contains($0) }
+        let keep = Set(candidates.map { FrameKey(url: visible[$0], full: false) })
         await cache.cancelPrefetches(keeping: keep)
         trimHotFrames()
         for index in candidates {
-            let url = files[index]
+            let url = visible[index]
             let task = await cache.prefetch(key: FrameKey(url: url, full: false)) {
                 try Task.checkCancellation()
                 let cpu = try ImagePipeline.loadDisplayFrame(from: url)
@@ -417,8 +623,9 @@ final class AppModel {
 
     /// ホットミラーは現在位置 ±2 の窓だけ保持する（実体はLRUキャッシュと共有）
     private func trimHotFrames() {
+        let visible = visibleFiles
         let window = (currentIndex - 2) ... (currentIndex + 2)
-        let allowed = Set(window.compactMap { files.indices.contains($0) ? files[$0] : nil })
+        let allowed = Set(window.compactMap { visible.indices.contains($0) ? visible[$0] : nil })
         hotFrames = hotFrames.filter { allowed.contains($0.key) }
     }
 

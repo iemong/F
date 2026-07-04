@@ -14,6 +14,15 @@ struct LeicaSelectApp: App {
                     model.openFolder()
                 }
                 .keyboardShortcut("o", modifiers: .command)
+
+                Menu("最近使ったフォルダ") {
+                    ForEach(model.recentFolders, id: \.self) { url in
+                        Button(url.lastPathComponent) {
+                            model.openFolder(at: url)
+                        }
+                    }
+                }
+                .disabled(model.recentFolders.isEmpty)
             }
         }
     }
@@ -103,7 +112,7 @@ struct ContentView: View {
             }
             return .handled
         }
-        .onKeyPress(keys: ["1", "2", "3", "4", "5", "0", "x"]) { press in
+        .onKeyPress(keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "x"]) { press in
             model.handleRatingKey(press.characters)
             return .handled
         }
@@ -111,15 +120,117 @@ struct ContentView: View {
             isFocused = true
             model.bootstrap()
         }
+        .navigationTitle(model.windowTitle)
+        .navigationSubtitle(model.positionText)
+        .toolbar {
+            ToolbarItem {
+                Button {
+                    model.openFolder()
+                } label: {
+                    Label("フォルダを開く", systemImage: "folder")
+                }
+                .help("フォルダを開く (⌘O)")
+            }
+            ToolbarItem {
+                Menu {
+                    if model.removableVolumes.isEmpty {
+                        Text("外部ボリュームなし")
+                    }
+                    ForEach(model.removableVolumes) { volume in
+                        Button(volume.name) {
+                            model.openVolume(volume)
+                        }
+                    }
+                } label: {
+                    Label("SDカード", systemImage: "sdcard")
+                }
+                .help("SDカード / 外部ボリュームを開く")
+            }
+            ToolbarItem {
+                filterMenu
+            }
+        }
+    }
+
+    private var filterMenu: some View {
+        Menu {
+            Picker(
+                "レート",
+                selection: Binding(
+                    get: { model.filter.minRating },
+                    set: { value in
+                        var updated = model.filter
+                        updated.minRating = value
+                        model.setFilter(updated)
+                    })
+            ) {
+                Text("すべて").tag(0)
+                ForEach(1 ..< 6) { n in
+                    Text("★\(n) 以上").tag(n)
+                }
+            }
+            Toggle(
+                "除外(✕)を隠す",
+                isOn: Binding(
+                    get: { model.filter.hideRejected },
+                    set: { value in
+                        var updated = model.filter
+                        updated.hideRejected = value
+                        model.setFilter(updated)
+                    }))
+            Picker(
+                "ラベル",
+                selection: Binding(
+                    get: { model.filter.label },
+                    set: { value in
+                        var updated = model.filter
+                        updated.label = value
+                        model.setFilter(updated)
+                    })
+            ) {
+                Text("すべて").tag(String?.none)
+                ForEach(ColorLabel.all, id: \.value) { item in
+                    Text("● \(LabelColorStyle.displayName(item.value)) (\(item.key))")
+                        .tag(String?.some(item.value))
+                }
+            }
+            if model.filter.isActive {
+                Divider()
+                Button("フィルター解除") {
+                    model.setFilter(FilterState())
+                }
+            }
+        } label: {
+            Label(
+                "フィルター",
+                systemImage: model.filter.isActive
+                    ? "line.3.horizontal.decrease.circle.fill"
+                    : "line.3.horizontal.decrease.circle")
+        }
+        .help("レート・ラベルで絞り込み")
     }
 
     private var emptyState: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 14) {
             Image(systemName: "photo.stack")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
-            Text("⌘O でDNGのあるフォルダを開く")
-                .foregroundStyle(.secondary)
+            Button("フォルダを開く…") {
+                model.openFolder()
+            }
+            if !model.recentFolders.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(model.recentFolders, id: \.self) { url in
+                        Button {
+                            model.openFolder(at: url)
+                        } label: {
+                            Label(url.lastPathComponent, systemImage: "clock")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+            }
         }
     }
 
@@ -139,6 +250,11 @@ struct ContentView: View {
                 Text(model.ratingText)
                     .foregroundStyle(model.ratingText.hasPrefix("✕") ? .red : .yellow)
             }
+            if let label = model.currentLabel {
+                Circle()
+                    .fill(LabelColorStyle.color(label))
+                    .frame(width: 9, height: 9)
+            }
             if !model.zoomText.isEmpty {
                 Text(model.zoomText)
                     .foregroundStyle(.cyan)
@@ -154,9 +270,9 @@ struct ContentView: View {
         }
         .font(.system(size: 12, weight: .medium, design: .monospaced))
         .foregroundStyle(.white)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 6))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .glassPanel(cornerRadius: 10)
         .padding(12)
     }
 }
