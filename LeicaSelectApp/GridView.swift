@@ -40,11 +40,9 @@ extension View {
 struct GridView: View {
     let model: AppModel
 
-    private static let cellSize: CGFloat = 196
-
     var body: some View {
         GeometryReader { geometry in
-            let columns = max(2, Int(geometry.size.width / Self.cellSize))
+            let columns = max(1, Int(geometry.size.width / max(120, model.gridCellSize)))
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVGrid(

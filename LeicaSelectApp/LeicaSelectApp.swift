@@ -29,7 +29,7 @@ struct LeicaSelectApp: App {
 }
 
 struct ContentView: View {
-    let model: AppModel
+    @Bindable var model: AppModel
     @FocusState private var isFocused: Bool
 
     var body: some View {
@@ -116,6 +116,13 @@ struct ContentView: View {
             model.handleRatingKey(press.characters)
             return .handled
         }
+        .onKeyPress(keys: ["t"]) { _ in
+            model.beginKeywordEditing()
+            return .handled
+        }
+        .sheet(isPresented: $model.isEditingKeywords) {
+            KeywordEditorView(model: model)
+        }
         .onAppear {
             isFocused = true
             model.bootstrap()
@@ -148,6 +155,13 @@ struct ContentView: View {
             }
             ToolbarItem {
                 filterMenu
+            }
+            if model.viewMode == .grid {
+                ToolbarItem {
+                    Slider(value: $model.gridCellSize, in: 120 ... 400)
+                        .frame(width: 120)
+                        .help("サムネイルの大きさ")
+                }
             }
         }
     }
@@ -192,6 +206,23 @@ struct ContentView: View {
                 ForEach(ColorLabel.all, id: \.value) { item in
                     Text("● \(LabelColorStyle.displayName(item.value)) (\(item.key))")
                         .tag(String?.some(item.value))
+                }
+            }
+            if !model.allFolderKeywords.isEmpty {
+                Picker(
+                    "キーワード",
+                    selection: Binding(
+                        get: { model.filter.keyword },
+                        set: { value in
+                            var updated = model.filter
+                            updated.keyword = value
+                            model.setFilter(updated)
+                        })
+                ) {
+                    Text("すべて").tag(String?.none)
+                    ForEach(model.allFolderKeywords, id: \.self) { keyword in
+                        Text("#\(keyword)").tag(String?.some(keyword))
+                    }
                 }
             }
             if model.filter.isActive {
@@ -254,6 +285,11 @@ struct ContentView: View {
                 Circle()
                     .fill(LabelColorStyle.color(label))
                     .frame(width: 9, height: 9)
+            }
+            if !model.currentKeywords.isEmpty {
+                Text(model.currentKeywords.map { "#\($0)" }.joined(separator: " "))
+                    .foregroundStyle(.cyan.opacity(0.9))
+                    .lineLimit(1)
             }
             if !model.zoomText.isEmpty {
                 Text(model.zoomText)

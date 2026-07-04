@@ -37,8 +37,10 @@ struct FilterState: Equatable {
     var hideRejected = false
     /// 特定カラーラベルのみ（nil = 無効）
     var label: String?
+    /// 特定キーワードを含むもののみ（nil = 無効）
+    var keyword: String?
 
-    var isActive: Bool { minRating > 0 || hideRejected || label != nil }
+    var isActive: Bool { minRating > 0 || hideRejected || label != nil || keyword != nil }
 }
 
 /// カラーラベル（Lightroom互換のxmp:Label値とキー割当 6-9）
@@ -60,6 +62,12 @@ final class AppModel {
     private(set) var zoomMode: ZoomMode = .fit
     /// グリッドの列数（ビュー側のレイアウトから通知される。上下キー移動に使う）
     var gridColumns = 5
+    /// グリッドのセルサイズ（スライダーで変更、UserDefaultsに永続化）
+    var gridCellSize: CGFloat = 196 {
+        didSet {
+            UserDefaults.standard.set(Double(gridCellSize), forKey: "gridCellSize")
+        }
+    }
     private(set) var currentFolder: URL?
     /// マウント中のSDカード等（NSWorkspaceの通知で更新）
     private(set) var removableVolumes: [RemovableVolume] = []
@@ -72,7 +80,13 @@ final class AppModel {
     private(set) var ratings: [URL: Int] = [:]
     /// URL → カラーラベル（"Red"等）。XMPサイドカーと同期
     private(set) var labels: [URL: String] = [:]
+    /// URL → キーワード（任意名タグ、dc:subject）。XMPサイドカーと同期
+    private(set) var keywords: [URL: [String]] = [:]
     private(set) var filter = FilterState()
+
+    /// キーワード編集シート（Tキー）
+    var isEditingKeywords = false
+    var keywordDraft = ""
 
     /// フィルター適用後の表示・送り対象。グリッドとナビゲーションはこちらを使う
     var visibleFiles: [URL] {
@@ -85,6 +99,9 @@ final class AppModel {
         if filter.hideRejected, rating == -1 { return false }
         if filter.minRating > 0, rating < filter.minRating { return false }
         if let wanted = filter.label, labels[url] != wanted { return false }
+        if let wanted = filter.keyword, !(keywords[url]?.contains(wanted) ?? false) {
+            return false
+        }
         return true
     }
 
@@ -117,6 +134,53 @@ final class AppModel {
 
     var currentLabel: String? {
         currentURL.flatMap { labels[$0] }
+    }
+
+    var currentKeywords: [String] {
+        currentURL.flatMap { keywords[$0] } ?? []
+    }
+
+    /// フォルダ内の全キーワード（フィルターメニューと編集サジェスト用）
+    var allFolderKeywords: [String] {
+        var counts: [String: Int] = [:]
+        for list in keywords.values {
+            for keyword in list { counts[keyword, default: 0] += 1 }
+        }
+        return counts.sorted { ($1.value, $0.key) < ($0.value, $1.key) }.map(\.key)
+    }
+
+    // MARK: - キーワード編集（Tキー）
+
+    func beginKeywordEditing() {
+        guard let url = currentURL else { return }
+        keywordDraft = (keywords[url] ?? []).joined(separator: ", ")
+        isEditingKeywords = true
+    }
+
+    func commitKeywordEditing() {
+        defer { isEditingKeywords = false }
+        guard let url = currentURL else { return }
+        var seen = Set<String>()
+        let parsed = keywordDraft
+            .split(whereSeparator: { $0 == "," || $0 == "、" })
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+        if parsed.isEmpty {
+            keywords.removeValue(forKey: url)
+        } else {
+            keywords[url] = parsed
+        }
+        Task.detached(priority: .utility) { [weak self] in
+            do {
+                try XMPSidecar.writeKeywords(parsed, forImageAt: url)
+            } catch {
+                await self?.reportRatingError(error, for: url)
+            }
+        }
+    }
+
+    func cancelKeywordEditing() {
+        isEditingKeywords = false
     }
 
     /// フィルター変更。選択中のファイルが残っていれば選択を維持する
@@ -192,6 +256,8 @@ final class AppModel {
         refreshRemovableVolumes()
         observeVolumeChanges()
         loadRecentFolders()
+        let savedCellSize = UserDefaults.standard.double(forKey: "gridCellSize")
+        if savedCellSize >= 120 { gridCellSize = savedCellSize }
 
         let arguments = CommandLine.arguments
         isAutotest = arguments.contains("--autotest")
@@ -233,6 +299,7 @@ final class AppModel {
         latencyText = ""
         ratings = [:]
         labels = [:]
+        keywords = [:]
         filter = FilterState()
         zoomMode = .fit
         statusText = "読み込み中…"
@@ -329,6 +396,7 @@ final class AppModel {
         Task.detached(priority: .utility) { [weak self] in
             var restoredRatings: [URL: Int] = [:]
             var restoredLabels: [URL: String] = [:]
+            var restoredKeywords: [URL: [String]] = [:]
             for url in urls {
                 if let rating = XMPSidecar.readRating(forImageAt: url), rating != 0 {
                     restoredRatings[url] = rating
@@ -336,21 +404,27 @@ final class AppModel {
                 if let label = XMPSidecar.readLabel(forImageAt: url) {
                     restoredLabels[url] = label
                 }
+                let kws = XMPSidecar.readKeywords(forImageAt: url)
+                if !kws.isEmpty { restoredKeywords[url] = kws }
             }
-            guard !restoredRatings.isEmpty || !restoredLabels.isEmpty else { return }
+            guard !restoredRatings.isEmpty || !restoredLabels.isEmpty || !restoredKeywords.isEmpty
+            else { return }
             await self?.applyRestoredMetadata(
-                ratings: restoredRatings, labels: restoredLabels, expecting: urls)
+                ratings: restoredRatings, labels: restoredLabels,
+                keywords: restoredKeywords, expecting: urls)
         }
     }
 
     private func applyRestoredMetadata(
         ratings restoredRatings: [URL: Int],
         labels restoredLabels: [URL: String],
+        keywords restoredKeywords: [URL: [String]],
         expecting urls: [URL]
     ) {
         guard files == urls else { return } // 復元中に別フォルダへ移動していたら破棄
         ratings.merge(restoredRatings) { current, _ in current } // セッション中の変更を優先
         labels.merge(restoredLabels) { current, _ in current }
+        keywords.merge(restoredKeywords) { current, _ in current }
     }
 
     func navigate(_ delta: Int) {
