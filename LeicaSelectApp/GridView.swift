@@ -77,8 +77,35 @@ struct GridView: View {
             }
             .onAppear { model.gridColumns = columns }
             .onChange(of: columns) { _, newValue in model.gridColumns = newValue }
+            .overlay(alignment: .bottomTrailing) {
+                sizeControl
+            }
         }
         .background(Color.black)
+    }
+
+    /// 写真.app風のサムネイルサイズコントロール（右下フローティング）
+    private var sizeControl: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "square.grid.3x3")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Slider(value: sizeBinding, in: 120 ... 400)
+                .controlSize(.mini)
+                .frame(width: 110)
+            Image(systemName: "square.grid.2x2")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .glassPanel(cornerRadius: 999)
+        .padding(12)
+        .help("サムネイルの大きさ (⌘+ / ⌘−)")
+    }
+
+    private var sizeBinding: Binding<CGFloat> {
+        Binding(get: { model.gridCellSize }, set: { model.gridCellSize = $0 })
     }
 }
 

@@ -24,6 +24,16 @@ struct LeicaSelectApp: App {
                 }
                 .disabled(model.recentFolders.isEmpty)
             }
+            CommandGroup(after: .sidebar) {
+                Button("サムネイルを拡大") {
+                    model.gridCellSize = min(400, model.gridCellSize + 40)
+                }
+                .keyboardShortcut("+", modifiers: .command)
+                Button("サムネイルを縮小") {
+                    model.gridCellSize = max(120, model.gridCellSize - 40)
+                }
+                .keyboardShortcut("-", modifiers: .command)
+            }
         }
     }
 }
@@ -155,13 +165,6 @@ struct ContentView: View {
             }
             ToolbarItem {
                 filterMenu
-            }
-            if model.viewMode == .grid {
-                ToolbarItem {
-                    Slider(value: $model.gridCellSize, in: 120 ... 400)
-                        .frame(width: 120)
-                        .help("サムネイルの大きさ")
-                }
             }
         }
     }
