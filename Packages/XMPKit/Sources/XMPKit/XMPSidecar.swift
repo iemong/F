@@ -110,6 +110,116 @@ public enum XMPSidecar {
         return nil
     }
 
+    /// キーワード（dc:subject、任意名タグ）を書く。空配列はブロック除去。
+    /// ファイルが無くキーワードも空なら何もしない
+    public static func writeKeywords(_ keywords: [String], forImageAt imageURL: URL) throws {
+        let sidecar = url(for: imageURL)
+        let content: String
+        if FileManager.default.fileExists(atPath: sidecar.path) {
+            guard let data = try? Data(contentsOf: sidecar),
+                let existing = String(data: data, encoding: .utf8)
+            else { throw XMPSidecarError.notUTF8 }
+            guard let updated = upsertKeywords(in: existing, keywords: keywords) else {
+                throw XMPSidecarError.unrecognizedFormat
+            }
+            content = updated
+        } else {
+            guard !keywords.isEmpty else { return }
+            guard
+                let updated = upsertKeywords(
+                    in: freshDocument(rating: nil), keywords: keywords)
+            else { throw XMPSidecarError.unrecognizedFormat }
+            content = updated
+        }
+        try Data(content.utf8).write(to: sidecar, options: .atomic)
+    }
+
+    /// サイドカーからキーワードを読む。ファイルなし/キーワードなしは空配列
+    public static func readKeywords(forImageAt imageURL: URL) -> [String] {
+        let sidecar = url(for: imageURL)
+        guard let data = try? Data(contentsOf: sidecar),
+            let content = String(data: data, encoding: .utf8)
+        else { return [] }
+        return keywords(in: content)
+    }
+
+    static func keywords(in xml: String) -> [String] {
+        guard
+            let block = xml.firstMatch(
+                of: /<dc:subject>.*?<\/dc:subject>/.dotMatchesNewlines())
+        else { return [] }
+        return String(block.0).matches(of: /<rdf:li[^>]*>([^<]*)<\/rdf:li>/)
+            .map { unescapeXML(String($0.1)) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// dc:subject ブロックを更新/挿入/除去する。他の内容には触れない
+    static func upsertKeywords(in xml: String, keywords: [String]) -> String? {
+        let blockPattern = /\s*<dc:subject>.*?<\/dc:subject>/.dotMatchesNewlines()
+
+        if keywords.isEmpty {
+            if let range = xml.firstRange(of: blockPattern) {
+                return xml.replacingCharacters(in: range, with: "")
+            }
+            return xml // キーワード未記載なら無変更
+        }
+
+        let items = keywords
+            .map { "    <rdf:li>\(escapeXML($0))</rdf:li>" }
+            .joined(separator: "\n")
+        let block = """
+
+               <dc:subject>
+                <rdf:Bag>
+            \(items)
+                </rdf:Bag>
+               </dc:subject>
+            """
+
+        var result = xml
+        // xmlns:dc 宣言がなければ rdf:Description に追加
+        if !result.contains("xmlns:dc=") {
+            guard let range = result.firstRange(of: /<rdf:Description\b/) else { return nil }
+            result = result.replacingCharacters(
+                in: range,
+                with: "<rdf:Description xmlns:dc=\"http://purl.org/dc/elements/1.1/\"")
+        }
+
+        // 既存ブロックを置換
+        if let range = result.firstRange(of: blockPattern) {
+            return result.replacingCharacters(in: range, with: block)
+        }
+        // 自己閉じ <rdf:Description .../> → 開きタグ化してブロックを挿入
+        if let range = result.firstRange(of: /<rdf:Description\b[^>]*?\/>/) {
+            let tag = String(result[range])
+            let opened = String(tag.dropLast(2)) + ">"
+            return result.replacingCharacters(
+                in: range, with: opened + block + "\n  </rdf:Description>")
+        }
+        // 開きタグ形式 → 直後に挿入
+        if let range = result.firstRange(of: /<rdf:Description\b[^>]*>/) {
+            let tag = String(result[range])
+            return result.replacingCharacters(in: range, with: tag + block)
+        }
+        return nil
+    }
+
+    static func escapeXML(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
+    static func unescapeXML(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&amp;", with: "&")
+    }
+
     static func label(in xml: String) -> String? {
         if let match = xml.firstMatch(of: /xmp:Label\s*=\s*"([^"]*)"/) {
             let value = String(match.1)

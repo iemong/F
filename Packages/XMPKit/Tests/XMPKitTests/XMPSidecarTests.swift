@@ -163,6 +163,65 @@ struct LabelTests {
     }
 }
 
+@Suite("キーワード(dc:subject)")
+struct KeywordTests {
+    @Test func ブロックの読み取り() {
+        let xml = """
+            <rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/">
+             <dc:subject><rdf:Bag>
+              <rdf:li>家族</rdf:li>
+              <rdf:li>公園</rdf:li>
+             </rdf:Bag></dc:subject>
+            </rdf:Description>
+            """
+        #expect(XMPSidecar.keywords(in: xml) == ["家族", "公園"])
+        #expect(XMPSidecar.keywords(in: "<rdf:Description/>") == [])
+    }
+
+    @Test func 自己閉じDescriptionへの挿入で他属性が保全される() throws {
+        let xml = #"<rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="3"/>"#
+        let updated = try #require(XMPSidecar.upsertKeywords(in: xml, keywords: ["旅行"]))
+        #expect(XMPSidecar.keywords(in: updated) == ["旅行"])
+        #expect(XMPSidecar.rating(in: updated) == 3)
+        #expect(updated.contains("xmlns:dc="))
+    }
+
+    @Test func 既存ブロックの置換と除去() throws {
+        let xml = #"<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/"/>"#
+        let first = try #require(XMPSidecar.upsertKeywords(in: xml, keywords: ["a", "b"]))
+        let replaced = try #require(XMPSidecar.upsertKeywords(in: first, keywords: ["c"]))
+        #expect(XMPSidecar.keywords(in: replaced) == ["c"])
+
+        let removed = try #require(XMPSidecar.upsertKeywords(in: replaced, keywords: []))
+        #expect(XMPSidecar.keywords(in: removed) == [])
+        #expect(!removed.contains("dc:subject"))
+    }
+
+    @Test func XMLエスケープの往復() throws {
+        let nasty = ["A&B", "x<y>", "引用\"符\""]
+        let xml = #"<rdf:Description/>"#
+        let updated = try #require(XMPSidecar.upsertKeywords(in: xml, keywords: nasty))
+        #expect(XMPSidecar.keywords(in: updated) == nasty)
+    }
+
+    @Test func ファイル往復とレートラベル共存() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("XMPKitKW-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let image = dir.appendingPathComponent("L1000020.DNG")
+
+        try XMPSidecar.writeKeywords(["猫", "夜"], forImageAt: image)
+        try XMPSidecar.writeRating(5, forImageAt: image)
+        try XMPSidecar.writeLabel("Red", forImageAt: image)
+        try XMPSidecar.writeKeywords(["猫", "夜", "散歩"], forImageAt: image)
+
+        #expect(XMPSidecar.readKeywords(forImageAt: image) == ["猫", "夜", "散歩"])
+        #expect(XMPSidecar.readRating(forImageAt: image) == 5)
+        #expect(XMPSidecar.readLabel(forImageAt: image) == "Red")
+    }
+}
+
 @Suite("ファイルの読み書き")
 struct SidecarFileTests {
     private func makeTempDir() throws -> URL {
