@@ -10,7 +10,7 @@ public enum DecodeError: Error, Equatable {
 /// DNGFile → 表示用画像のフルパイプライン。os_signpost で各段を計測する
 public enum DNGDecoder {
     private static let signposter = OSSignposter(
-        subsystem: "LeicaSelect.DecodeKit", category: "decode")
+        subsystem: "F.DecodeKit", category: "decode")
 
     /// raw を LJ92 デコードして 2×2→1px のハーフサイズ RGBA8 を返す。
     /// キー送り時のフィット表示用（M262 で必須のパス）

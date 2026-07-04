@@ -267,7 +267,7 @@ public enum XMPSidecar {
         if let label { attributes += "\n    xmp:Label=\"\(label)\"" }
         return """
             <?xpacket begin="\u{FEFF}" id="W5M0MpCehiHzreSzNTczkc9d"?>
-            <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="LeicaSelect">
+            <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="F">
              <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
               <rdf:Description rdf:about=""
                 xmlns:xmp="http://ns.adobe.com/xap/1.0/"\(attributes)/>

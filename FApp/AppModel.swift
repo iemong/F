@@ -74,7 +74,7 @@ final class AppModel {
     private(set) var recentFolders: [URL] = []
 
     var windowTitle: String {
-        currentFolder?.lastPathComponent ?? "LeicaSelect"
+        currentFolder?.lastPathComponent ?? "F"
     }
     /// URL → レート（1-5、-1=除外。0/未登録=なし）。XMPサイドカーと同期
     private(set) var ratings: [URL: Int] = [:]
@@ -234,7 +234,7 @@ final class AppModel {
     @ObservationIgnored private var lastWorkMS: Double = 0
     @ObservationIgnored private var lastDecodeDuration: Duration = .zero
     @ObservationIgnored private let signposter = OSSignposter(
-        subsystem: "LeicaSelect.App", category: "navigation")
+        subsystem: "F.App", category: "navigation")
     @ObservationIgnored private var navigateState: OSSignpostIntervalState?
 
     private enum AutotestPhase {
