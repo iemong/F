@@ -18,55 +18,29 @@ public enum HalfSizeRenderer {
         asShotNeutral: [Double]?,
         colorMatrix2: [Double]?
     ) -> RGBA8Image {
+        let pipeline = ColorPipeline(
+            cfaPattern: cfaPattern, blackLevels: blackLevels, whiteLevel: whiteLevel,
+            asShotNeutral: asShotNeutral, colorMatrix2: colorMatrix2)
         let halfWidth = raw.width / 2
         let halfHeight = raw.height / 2
-        let neutral = asShotNeutral ?? [1, 1, 1]
-
-        // CFA位置(2×2 row-major)→チャンネル。想定外パターンはRGGB扱い
-        var channelOf: [Int] = cfaPattern.count == 4 ? cfaPattern.map(Int.init) : [0, 1, 1, 2]
-        if channelOf.sorted() != [0, 1, 1, 2] { channelOf = [0, 1, 1, 2] }
-
-        // CFA位置ごとの 16bit値→(正規化+WB済み)Float LUT
-        let lutSize = 1 << 16
-        var positionLUTs = [Float](repeating: 0, count: 4 * lutSize)
-        for position in 0 ..< 4 {
-            let black = blackLevels.count == 4 ? blackLevels[position] : 0
-            let scale = 1.0 / (Double(whiteLevel) - black)
-            let wb = 1.0 / max(neutral[channelOf[position]], 1e-6)
-            let base = position * lutSize
-            for value in 0 ..< lutSize {
-                let linear = (Double(value) - black) * scale * wb
-                positionLUTs[base + value] = Float(max(0, linear))
-            }
-        }
-
-        let camToSRGB = Self.cameraToSRGBMatrix(colorMatrix2: colorMatrix2).map(Float.init)
-
-        // 線形→sRGBガンマの LUT（4096分割）
-        var gammaLUT = [UInt8](repeating: 0, count: 4097)
-        for i in 0 ... 4096 {
-            let v = Double(i) / 4096
-            let srgb = v <= 0.0031308 ? 12.92 * v : 1.055 * pow(v, 1 / 2.4) - 0.055
-            gammaLUT[i] = UInt8(min(255, max(0, srgb * 255 + 0.5)))
-        }
+        let lutSize = ColorPipeline.lutSize
 
         var pixels = [UInt8](repeating: 255, count: halfWidth * halfHeight * 4)
         let rowStride = raw.width
-        // 2×2 内の R/B の位置（channelOf は検証済みで必ず 0 と 2 を1つずつ含む）
-        let rPosition = channelOf.firstIndex(of: 0) ?? 0
-        let bPosition = channelOf.firstIndex(of: 2) ?? 3
+        let rPosition = pipeline.rPosition
+        let bPosition = pipeline.bPosition
 
         raw.samples.withUnsafeBufferPointer { srcBuffer in
-            positionLUTs.withUnsafeBufferPointer { lutsBuffer in
-                gammaLUT.withUnsafeBufferPointer { gammaBuffer in
+            pipeline.positionLUTs.withUnsafeBufferPointer { lutsBuffer in
+                pipeline.gammaLUT.withUnsafeBufferPointer { gammaBuffer in
                     pixels.withUnsafeMutableBufferPointer { dstBuffer in
                         nonisolated(unsafe) let src = srcBuffer.baseAddress!
                         nonisolated(unsafe) let luts = lutsBuffer.baseAddress!
                         nonisolated(unsafe) let gamma = gammaBuffer.baseAddress!
                         nonisolated(unsafe) let dst = dstBuffer.baseAddress!
-                        let m0 = camToSRGB[0], m1 = camToSRGB[1], m2 = camToSRGB[2]
-                        let m3 = camToSRGB[3], m4 = camToSRGB[4], m5 = camToSRGB[5]
-                        let m6 = camToSRGB[6], m7 = camToSRGB[7], m8 = camToSRGB[8]
+                        let m0 = pipeline.matrix[0], m1 = pipeline.matrix[1], m2 = pipeline.matrix[2]
+                        let m3 = pipeline.matrix[3], m4 = pipeline.matrix[4], m5 = pipeline.matrix[5]
+                        let m6 = pipeline.matrix[6], m7 = pipeline.matrix[7], m8 = pipeline.matrix[8]
 
                         // 行単位で独立なので並列化できる（書き込み範囲は行ごとに素）
                         DispatchQueue.concurrentPerform(iterations: halfHeight) { y in
@@ -118,50 +92,5 @@ public enum HalfSizeRenderer {
         }
 
         return RGBA8Image(width: halfWidth, height: halfHeight, pixels: pixels)
-    }
-
-    /// dcraw と同じ流儀で cam→sRGB 行列を作る:
-    /// ColorMatrix2(XYZ→cam) × (sRGB→XYZ) を行正規化して逆行列を取る。
-    /// 行正規化により WB 済みのニュートラル (1,1,1) が sRGB の白に写る
-    static func cameraToSRGBMatrix(colorMatrix2: [Double]?) -> [Double] {
-        let identity: [Double] = [1, 0, 0, 0, 1, 0, 0, 0, 1]
-        guard let cm = colorMatrix2, cm.count == 9 else { return identity }
-
-        // sRGB→XYZ (D65)
-        let srgbToXYZ: [Double] = [
-            0.4124564, 0.3575761, 0.1804375,
-            0.2126729, 0.7151522, 0.0721750,
-            0.0193339, 0.1191920, 0.9503041,
-        ]
-        // cam_rgb = cm × srgbToXYZ（sRGB→cam の応答）
-        var camRGB = [Double](repeating: 0, count: 9)
-        for i in 0 ..< 3 {
-            for j in 0 ..< 3 {
-                for k in 0 ..< 3 {
-                    camRGB[i * 3 + j] += cm[i * 3 + k] * srgbToXYZ[k * 3 + j]
-                }
-            }
-        }
-        // 行正規化: cam の白応答を (1,1,1) に
-        for i in 0 ..< 3 {
-            let sum = camRGB[i * 3] + camRGB[i * 3 + 1] + camRGB[i * 3 + 2]
-            guard abs(sum) > 1e-9 else { return identity }
-            for j in 0 ..< 3 { camRGB[i * 3 + j] /= sum }
-        }
-        return invert3x3(camRGB) ?? identity
-    }
-
-    static func invert3x3(_ m: [Double]) -> [Double]? {
-        let a = m[0], b = m[1], c = m[2]
-        let d = m[3], e = m[4], f = m[5]
-        let g = m[6], h = m[7], i = m[8]
-        let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
-        guard abs(det) > 1e-12 else { return nil }
-        let inv = 1 / det
-        return [
-            (e * i - f * h) * inv, (c * h - b * i) * inv, (b * f - c * e) * inv,
-            (f * g - d * i) * inv, (a * i - c * g) * inv, (c * d - a * f) * inv,
-            (d * h - e * g) * inv, (b * g - a * h) * inv, (a * e - b * d) * inv,
-        ]
     }
 }

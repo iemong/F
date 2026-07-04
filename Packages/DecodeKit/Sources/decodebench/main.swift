@@ -3,10 +3,12 @@ import DNGKit
 import Foundation
 
 /// ベンチマーク: read / LJ92 / halfsize の各段を計測する。
-/// --ppm を付けると結果画像を PPM(P6) で書き出す（目視確認用）
+/// --ppm  結果画像を PPM(P6) で書き出す（目視確認用）
+/// --full ハーフサイズの代わりにフルデモザイクを計測
 var arguments = Array(CommandLine.arguments.dropFirst())
 let writePPM = arguments.contains("--ppm")
-arguments.removeAll { $0 == "--ppm" }
+let fullDemosaic = arguments.contains("--full")
+arguments.removeAll { $0 == "--ppm" || $0 == "--full" }
 
 guard !arguments.isEmpty else {
     print("usage: decodebench [--ppm] <file.DNG> ...")
@@ -44,13 +46,23 @@ for path in arguments {
         guard let raw else { continue }
         var image: RGBA8Image?
         let renderTime = clock.measure {
-            image = HalfSizeRenderer.render(
-                raw: raw,
-                cfaPattern: rawInfo.cfaPattern,
-                blackLevels: rawInfo.blackLevels,
-                whiteLevel: rawInfo.whiteLevel,
-                asShotNeutral: file.asShotNeutral,
-                colorMatrix2: file.colorMatrix2)
+            if fullDemosaic {
+                image = FullDemosaicRenderer.render(
+                    raw: raw,
+                    cfaPattern: rawInfo.cfaPattern,
+                    blackLevels: rawInfo.blackLevels,
+                    whiteLevel: rawInfo.whiteLevel,
+                    asShotNeutral: file.asShotNeutral,
+                    colorMatrix2: file.colorMatrix2)
+            } else {
+                image = HalfSizeRenderer.render(
+                    raw: raw,
+                    cfaPattern: rawInfo.cfaPattern,
+                    blackLevels: rawInfo.blackLevels,
+                    whiteLevel: rawInfo.whiteLevel,
+                    asShotNeutral: file.asShotNeutral,
+                    colorMatrix2: file.colorMatrix2)
+            }
         }
 
         guard let image else { continue }

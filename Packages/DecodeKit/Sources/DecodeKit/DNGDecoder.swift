@@ -45,4 +45,35 @@ public enum DNGDecoder {
         signposter.endInterval("halfsize", renderState)
         return image
     }
+
+    /// raw を LJ92 デコードしてフル解像度の bilinear デモザイク画像を返す。
+    /// 100%等倍のピント確認用（重いので等倍要求時に遅延実行する）
+    public static func fullSizeImage(from file: DNGFile) throws -> RGBA8Image {
+        guard let rawInfo = file.raw else { throw DecodeError.noRawData }
+        guard rawInfo.compression == 7 else {
+            throw DecodeError.unsupportedLayout("compression \(rawInfo.compression)")
+        }
+        guard let data = file.rawDataContiguous() else { throw DecodeError.noRawData }
+
+        let decodeState = signposter.beginInterval("lj92")
+        let raw = try LJ92Decoder.decode(data)
+        signposter.endInterval("lj92", decodeState)
+
+        guard raw.width == rawInfo.pixelSize.width, raw.height == rawInfo.pixelSize.height
+        else {
+            throw DecodeError.unsupportedLayout(
+                "decoded \(raw.width)x\(raw.height) != tag \(rawInfo.pixelSize)")
+        }
+
+        let renderState = signposter.beginInterval("demosaic")
+        let image = FullDemosaicRenderer.render(
+            raw: raw,
+            cfaPattern: rawInfo.cfaPattern,
+            blackLevels: rawInfo.blackLevels,
+            whiteLevel: rawInfo.whiteLevel,
+            asShotNeutral: file.asShotNeutral,
+            colorMatrix2: file.colorMatrix2)
+        signposter.endInterval("demosaic", renderState)
+        return image
+    }
 }
