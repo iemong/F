@@ -63,6 +63,10 @@ struct ContentView: View {
             model.navigate(1)
             return .handled
         }
+        .onKeyPress(keys: ["1", "2", "3", "4", "5", "0", "x"]) { press in
+            model.handleRatingKey(press.characters)
+            return .handled
+        }
         .onAppear {
             isFocused = true
             model.bootstrap()
@@ -76,6 +80,10 @@ struct ContentView: View {
             }
             if !model.fileNameText.isEmpty {
                 Text(model.fileNameText)
+            }
+            if !model.ratingText.isEmpty {
+                Text(model.ratingText)
+                    .foregroundStyle(model.ratingText.hasPrefix("✕") ? .red : .yellow)
             }
             if !model.latencyText.isEmpty {
                 Text(model.latencyText)

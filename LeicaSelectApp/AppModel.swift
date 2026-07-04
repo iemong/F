@@ -3,6 +3,7 @@ import CacheKit
 import Foundation
 import Observation
 import QuartzCore
+import XMPKit
 import os
 
 @MainActor
@@ -13,6 +14,8 @@ final class AppModel {
     private(set) var currentFrame: PresentedFrame?
     private(set) var statusText = ""
     private(set) var latencyText = ""
+    /// URL → レート（1-5、-1=除外。0/未登録=なし）。XMPサイドカーと同期
+    private(set) var ratings: [URL: Int] = [:]
 
     var positionText: String {
         files.isEmpty ? "" : "\(currentIndex + 1)/\(files.count)"
@@ -20,6 +23,15 @@ final class AppModel {
 
     var fileNameText: String {
         currentFrame?.frame.fileName ?? ""
+    }
+
+    var ratingText: String {
+        guard let url = currentURL, let rating = ratings[url], rating != 0 else { return "" }
+        return rating == -1 ? "✕ 除外" : String(repeating: "★", count: rating)
+    }
+
+    private var currentURL: URL? {
+        files.indices.contains(currentIndex) ? files[currentIndex] : nil
     }
 
     /// テクスチャキャッシュ（上限2GB、コスト=テクスチャバイト数）
@@ -98,9 +110,30 @@ final class AppModel {
         currentFrame = nil
         statusText = files.isEmpty ? "DNGが見つかりません" : ""
         latencyText = ""
+        ratings = [:]
         if !files.isEmpty {
             loadCurrent()
+            restoreRatings(for: files)
         }
+    }
+
+    /// 既存XMPサイドカーからレートを復元する
+    private func restoreRatings(for urls: [URL]) {
+        Task.detached(priority: .utility) { [weak self] in
+            var restored: [URL: Int] = [:]
+            for url in urls {
+                if let rating = XMPSidecar.readRating(forImageAt: url), rating != 0 {
+                    restored[url] = rating
+                }
+            }
+            guard !restored.isEmpty else { return }
+            await self?.applyRestoredRatings(restored, expecting: urls)
+        }
+    }
+
+    private func applyRestoredRatings(_ restored: [URL: Int], expecting urls: [URL]) {
+        guard files == urls else { return } // 復元中に別フォルダへ移動していたら破棄
+        ratings.merge(restored) { current, _ in current } // セッション中の変更を優先
     }
 
     func navigate(_ delta: Int) {
@@ -132,6 +165,45 @@ final class AppModel {
             return
         }
         loadCurrent()
+    }
+
+    /// レートキーの処理。"1"-"5"=レート / "0"=クリア / "x"=除外トグル
+    func handleRatingKey(_ characters: String) {
+        switch characters.lowercased() {
+        case "1", "2", "3", "4", "5":
+            applyRating(Int(characters)!)
+        case "0":
+            applyRating(0)
+        case "x":
+            applyRating(-1)
+        default:
+            break
+        }
+    }
+
+    /// レートを適用してXMPサイドカーへ非同期書き込み。除外(-1)は再指定でトグル解除
+    private func applyRating(_ rating: Int) {
+        guard let url = currentURL else { return }
+        let current = ratings[url] ?? 0
+        let new = (rating == -1 && current == -1) ? 0 : rating
+        guard new != current else { return }
+        ratings[url] = new
+
+        // クリアかつサイドカー未作成なら、わざわざファイルを作らない
+        if new == 0, !FileManager.default.fileExists(atPath: XMPSidecar.url(for: url).path) {
+            return
+        }
+        Task.detached(priority: .utility) { [weak self] in
+            do {
+                try XMPSidecar.writeRating(new, forImageAt: url)
+            } catch {
+                await self?.reportRatingError(error, for: url)
+            }
+        }
+    }
+
+    private func reportRatingError(_ error: any Error, for url: URL) {
+        statusText = "XMP書き込み失敗 (\(url.lastPathComponent)): \(error)"
     }
 
     /// レンダラから present 完了が通知される。キー押下→表示のレイテンシ確定点。
