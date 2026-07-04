@@ -11,3 +11,6 @@ DerivedData/
 xcuserdata/
 *.xcuserstate
 .DS_Store
+
+# XcodeBuildMCP ローカル設定
+.xcodebuildmcp/
