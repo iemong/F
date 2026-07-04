@@ -219,8 +219,9 @@ final class AppModel {
                 return try TextureFactory.makeFrame(from: cpu)
             }
             Task { [weak self] in
+                // このTaskはMainActorを継承するため storeHotFrame は同期呼び出しでよい
                 guard let frame = try? await task.value else { return }
-                await self?.storeHotFrame(frame, for: url)
+                self?.storeHotFrame(frame, for: url)
             }
         }
     }
