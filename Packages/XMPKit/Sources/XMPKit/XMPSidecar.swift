@@ -46,6 +46,35 @@ public enum XMPSidecar {
         return rating(in: content)
     }
 
+    /// カラーラベル（xmp:Label、Lightroom/C1互換。"Red"/"Yellow"/"Green"/"Blue"等）を書く。
+    /// nil はラベル除去。ファイルが無くラベルも nil なら何もしない
+    public static func writeLabel(_ label: String?, forImageAt imageURL: URL) throws {
+        let sidecar = url(for: imageURL)
+        let content: String
+        if FileManager.default.fileExists(atPath: sidecar.path) {
+            guard let data = try? Data(contentsOf: sidecar),
+                let existing = String(data: data, encoding: .utf8)
+            else { throw XMPSidecarError.notUTF8 }
+            guard let updated = upsertLabel(in: existing, label: label) else {
+                throw XMPSidecarError.unrecognizedFormat
+            }
+            content = updated
+        } else {
+            guard let label else { return }
+            content = freshDocument(rating: nil, label: label)
+        }
+        try Data(content.utf8).write(to: sidecar, options: .atomic)
+    }
+
+    /// サイドカーからラベルを読む。ファイルなし/ラベルなしは nil
+    public static func readLabel(forImageAt imageURL: URL) -> String? {
+        let sidecar = url(for: imageURL)
+        guard let data = try? Data(contentsOf: sidecar),
+            let content = String(data: data, encoding: .utf8)
+        else { return nil }
+        return label(in: content)
+    }
+
     // MARK: - XMP文字列操作（テスト用にinternal公開）
 
     static func rating(in xml: String) -> Int? {
@@ -81,17 +110,60 @@ public enum XMPSidecar {
         return nil
     }
 
-    static func freshDocument(rating: Int) -> String {
-        """
-        <?xpacket begin="\u{FEFF}" id="W5M0MpCehiHzreSzNTczkc9d"?>
-        <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="LeicaSelect">
-         <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-          <rdf:Description rdf:about=""
-            xmlns:xmp="http://ns.adobe.com/xap/1.0/"
-            xmp:Rating="\(rating)"/>
-         </rdf:RDF>
-        </x:xmpmeta>
-        <?xpacket end="w"?>
-        """
+    static func label(in xml: String) -> String? {
+        if let match = xml.firstMatch(of: /xmp:Label\s*=\s*"([^"]*)"/) {
+            let value = String(match.1)
+            return value.isEmpty ? nil : value
+        }
+        if let match = xml.firstMatch(of: /<xmp:Label>\s*([^<]*?)\s*<\/xmp:Label>/) {
+            let value = String(match.1)
+            return value.isEmpty ? nil : value
+        }
+        return nil
+    }
+
+    /// xmp:Label を更新/挿入/除去する。他の内容には触れない
+    static func upsertLabel(in xml: String, label: String?) -> String? {
+        if let label {
+            if let range = xml.firstRange(of: /xmp:Label\s*=\s*"[^"]*"/) {
+                return xml.replacingCharacters(in: range, with: "xmp:Label=\"\(label)\"")
+            }
+            if let range = xml.firstRange(of: /<xmp:Label>[^<]*<\/xmp:Label>/) {
+                return xml.replacingCharacters(
+                    in: range, with: "<xmp:Label>\(label)</xmp:Label>")
+            }
+            if let range = xml.firstRange(of: /<rdf:Description\b/) {
+                var insertion = " xmp:Label=\"\(label)\""
+                if !xml.contains("xmlns:xmp=") {
+                    insertion = " xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\"" + insertion
+                }
+                return xml.replacingCharacters(in: range, with: "<rdf:Description" + insertion)
+            }
+            return nil
+        }
+        // 除去（前置スペースごと消す。要素形式も対応）
+        if let range = xml.firstRange(of: /\s*xmp:Label\s*=\s*"[^"]*"/) {
+            return xml.replacingCharacters(in: range, with: "")
+        }
+        if let range = xml.firstRange(of: /\s*<xmp:Label>[^<]*<\/xmp:Label>/) {
+            return xml.replacingCharacters(in: range, with: "")
+        }
+        return xml // ラベル未記載なら無変更
+    }
+
+    static func freshDocument(rating: Int?, label: String? = nil) -> String {
+        var attributes = ""
+        if let rating { attributes += "\n    xmp:Rating=\"\(rating)\"" }
+        if let label { attributes += "\n    xmp:Label=\"\(label)\"" }
+        return """
+            <?xpacket begin="\u{FEFF}" id="W5M0MpCehiHzreSzNTczkc9d"?>
+            <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="LeicaSelect">
+             <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+              <rdf:Description rdf:about=""
+                xmlns:xmp="http://ns.adobe.com/xap/1.0/"\(attributes)/>
+             </rdf:RDF>
+            </x:xmpmeta>
+            <?xpacket end="w"?>
+            """
     }
 }

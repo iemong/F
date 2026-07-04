@@ -106,6 +106,63 @@ struct RatingUpsertTests {
     }
 }
 
+@Suite("ラベルの読み書き")
+struct LabelTests {
+    @Test func 属性形式の読み取り() {
+        #expect(XMPSidecar.label(in: #"<rdf:Description xmp:Label="Red"/>"#) == "Red")
+        #expect(XMPSidecar.label(in: "<xmp:Label>Blue</xmp:Label>") == "Blue")
+        #expect(XMPSidecar.label(in: "<rdf:Description/>") == nil)
+    }
+
+    @Test func ラベルの挿入と置換() throws {
+        let xml = #"<rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="3"/>"#
+        let inserted = try #require(XMPSidecar.upsertLabel(in: xml, label: "Yellow"))
+        #expect(XMPSidecar.label(in: inserted) == "Yellow")
+        #expect(XMPSidecar.rating(in: inserted) == 3, "Ratingは保全される")
+
+        let replaced = try #require(XMPSidecar.upsertLabel(in: inserted, label: "Green"))
+        #expect(XMPSidecar.label(in: replaced) == "Green")
+    }
+
+    @Test func nilでラベルを除去() throws {
+        let xml = #"<rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Label="Red" xmp:Rating="2"/>"#
+        let removed = try #require(XMPSidecar.upsertLabel(in: xml, label: nil))
+        #expect(XMPSidecar.label(in: removed) == nil)
+        #expect(XMPSidecar.rating(in: removed) == 2)
+    }
+
+    @Test func ファイル往復とレートとの共存() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("XMPKitLabel-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let image = dir.appendingPathComponent("L1000010.DNG")
+
+        // ラベルのみ → レート追加 → ラベル変更 → 両方残る
+        try XMPSidecar.writeLabel("Red", forImageAt: image)
+        #expect(XMPSidecar.readLabel(forImageAt: image) == "Red")
+
+        try XMPSidecar.writeRating(4, forImageAt: image)
+        try XMPSidecar.writeLabel("Blue", forImageAt: image)
+        #expect(XMPSidecar.readLabel(forImageAt: image) == "Blue")
+        #expect(XMPSidecar.readRating(forImageAt: image) == 4)
+
+        try XMPSidecar.writeLabel(nil, forImageAt: image)
+        #expect(XMPSidecar.readLabel(forImageAt: image) == nil)
+        #expect(XMPSidecar.readRating(forImageAt: image) == 4)
+    }
+
+    @Test func ファイルなしでラベル除去は何もしない() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("XMPKitLabel-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let image = dir.appendingPathComponent("L1000011.DNG")
+        try XMPSidecar.writeLabel(nil, forImageAt: image)
+        #expect(!FileManager.default.fileExists(atPath: XMPSidecar.url(for: image).path))
+    }
+}
+
 @Suite("ファイルの読み書き")
 struct SidecarFileTests {
     private func makeTempDir() throws -> URL {
