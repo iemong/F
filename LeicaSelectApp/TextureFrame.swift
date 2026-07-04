@@ -22,6 +22,12 @@ struct TextureFrame: @unchecked Sendable {
     let fileName: String
     /// パース+デコード+アップロードに要した時間
     let decodeDuration: Duration
+    /// センサーフル解像度相当か（Q3のJpgFromRaw=true / M262ハーフサイズ=false）
+    let isFullResolution: Bool
+    /// 論理的なシーン寸法（フル解像度でのピクセル数）。
+    /// ハーフサイズテクスチャでも等倍表示の座標系はこちらを使う
+    let sceneWidth: Int
+    let sceneHeight: Int
 
     var byteCost: Int { texture.width * texture.height * 4 }
 }
@@ -64,6 +70,9 @@ enum TextureFactory {
             texture: texture,
             orientation: frame.orientation,
             fileName: frame.fileName,
-            decodeDuration: frame.decodeDuration)
+            decodeDuration: frame.decodeDuration,
+            isFullResolution: frame.isFullResolution,
+            sceneWidth: frame.sceneWidth,
+            sceneHeight: frame.sceneHeight)
     }
 }

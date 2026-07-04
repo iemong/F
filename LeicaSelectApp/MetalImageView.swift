@@ -5,9 +5,10 @@ import QuartzCore
 import SwiftUI
 
 /// CAMetalLayer 直叩きの画像表示ビュー。
-/// アスペクトフィット + Orientation 回転をクアッドの頂点/UVで解決する
+/// アスペクトフィット / 100%等倍（パン付き）と Orientation 回転をクアッドで解決する
 struct MetalImageView: NSViewRepresentable {
     let presented: PresentedFrame
+    let zoomMode: ZoomMode
     /// 引数は presentされたフレームのgeneration と実提示時刻（CACurrentMediaTime基準）。
     /// generation は古いフレームの再描画と区別するために使う
     let onPresent: @MainActor (Int, CFTimeInterval) -> Void
@@ -23,6 +24,7 @@ struct MetalImageView: NSViewRepresentable {
 
     func updateNSView(_ view: MetalLayerView, context: Context) {
         view.onPresent = onPresent
+        view.setZoomMode(zoomMode)
         view.show(presented)
     }
 }
@@ -30,10 +32,17 @@ struct MetalImageView: NSViewRepresentable {
 final class MetalLayerView: NSView {
     private var renderer: QuadRenderer?
     private var currentFrame: PresentedFrame?
-    /// 同一世代・同一サイズの二重エンコードを防ぐ（直接描画とSwiftUI更新の重複で
+    private var zoomMode: ZoomMode = .fit
+    /// シーン座標(=デバイスpx)での中心からの平行移動。等倍時のみ有効
+    private var panOffset = CGPoint.zero
+
+    /// 同一条件の二重エンコードを防ぐ（直接描画とSwiftUI更新の重複で
     /// drawableキューが飽和し、presentが1フレーム遅れるのを避ける）
     private var renderedGeneration = -1
     private var renderedSize = CGSize.zero
+    private var renderedZoom: ZoomMode = .fit
+    private var renderedPan = CGPoint.zero
+
     var onPresent: (@MainActor (Int, CFTimeInterval) -> Void)?
 
     private var metalLayer: CAMetalLayer? { layer as? CAMetalLayer }
@@ -70,6 +79,13 @@ final class MetalLayerView: NSView {
         render()
     }
 
+    func setZoomMode(_ mode: ZoomMode) {
+        guard zoomMode != mode else { return }
+        zoomMode = mode
+        panOffset = .zero
+        render()
+    }
+
     override func layout() {
         super.layout()
         updateDrawableSize()
@@ -80,6 +96,27 @@ final class MetalLayerView: NSView {
         super.viewDidChangeBackingProperties()
         updateDrawableSize()
         render()
+    }
+
+    // 等倍時のドラッグでパン
+    override func mouseDragged(with event: NSEvent) {
+        guard zoomMode == .actualSize else { return }
+        let scale = window?.backingScaleFactor ?? 2
+        panOffset.x += event.deltaX * scale
+        panOffset.y -= event.deltaY * scale // 画面下ドラッグ=コンテンツ下移動(NDCは上が正)
+        clampPan()
+        render()
+    }
+
+    private func clampPan() {
+        guard let frame = currentFrame?.frame, let metalLayer else { return }
+        let swaps = frame.orientation.swapsDimensions
+        let sceneW = CGFloat(swaps ? frame.sceneHeight : frame.sceneWidth)
+        let sceneH = CGFloat(swaps ? frame.sceneWidth : frame.sceneHeight)
+        let maxX = max(0, (sceneW - metalLayer.drawableSize.width) / 2)
+        let maxY = max(0, (sceneH - metalLayer.drawableSize.height) / 2)
+        panOffset.x = min(max(panOffset.x, -maxX), maxX)
+        panOffset.y = min(max(panOffset.y, -maxY), maxY)
     }
 
     private func updateDrawableSize() {
@@ -96,16 +133,23 @@ final class MetalLayerView: NSView {
         guard let renderer, let metalLayer, let presented = currentFrame,
             metalLayer.drawableSize.width > 0
         else { return }
+        if zoomMode == .actualSize { clampPan() }
         if renderedGeneration == presented.generation,
-            renderedSize == metalLayer.drawableSize
+            renderedSize == metalLayer.drawableSize,
+            renderedZoom == zoomMode,
+            renderedPan == panOffset
         {
             return
         }
         renderedGeneration = presented.generation
         renderedSize = metalLayer.drawableSize
+        renderedZoom = zoomMode
+        renderedPan = panOffset
         let callback = onPresent
         let generation = presented.generation
-        renderer.draw(into: metalLayer, orientation: presented.frame.orientation) { presentedTime in
+        renderer.draw(
+            into: metalLayer, frame: presented.frame, zoom: zoomMode, pan: panOffset
+        ) { presentedTime in
             if let callback {
                 Task { @MainActor in callback(generation, presentedTime) }
             }
@@ -113,7 +157,7 @@ final class MetalLayerView: NSView {
     }
 }
 
-/// テクスチャ1枚をアスペクトフィットで描くだけの最小レンダラ
+/// テクスチャ1枚をフィット/等倍で描くだけの最小レンダラ
 @MainActor
 final class QuadRenderer {
     let device: MTLDevice
@@ -174,7 +218,9 @@ final class QuadRenderer {
 
     func draw(
         into layer: CAMetalLayer,
-        orientation: Orientation,
+        frame: TextureFrame,
+        zoom: ZoomMode,
+        pan: CGPoint,
         onPresent: @escaping @Sendable (CFTimeInterval) -> Void
     ) {
         guard let texture,
@@ -182,23 +228,44 @@ final class QuadRenderer {
             let commandBuffer = commandQueue.makeCommandBuffer()
         else { return }
 
-        // 表示上の縦横（90度系は入れ替え）でアスペクトフィット
-        let imageWidth =
-            orientation.swapsDimensions ? CGFloat(texture.height) : CGFloat(texture.width)
-        let imageHeight =
-            orientation.swapsDimensions ? CGFloat(texture.width) : CGFloat(texture.height)
+        // ジオメトリはシーン寸法（フル解像度px）基準。
+        // ハーフサイズテクスチャでも等倍座標系が変わらないので、
+        // フル解像への差し替え時に表示位置が飛ばない
+        let orientation = frame.orientation
+        let sceneWidth =
+            orientation.swapsDimensions ? CGFloat(frame.sceneHeight) : CGFloat(frame.sceneWidth)
+        let sceneHeight =
+            orientation.swapsDimensions ? CGFloat(frame.sceneWidth) : CGFloat(frame.sceneHeight)
         let drawableSize = layer.drawableSize
-        let scale = min(drawableSize.width / imageWidth, drawableSize.height / imageHeight)
-        let ndcWidth = Float(imageWidth * scale / drawableSize.width)
-        let ndcHeight = Float(imageHeight * scale / drawableSize.height)
+
+        let quadWidthPx: CGFloat
+        let quadHeightPx: CGFloat
+        let centerOffset: CGPoint
+        switch zoom {
+        case .fit:
+            let scale = min(drawableSize.width / sceneWidth, drawableSize.height / sceneHeight)
+            quadWidthPx = sceneWidth * scale
+            quadHeightPx = sceneHeight * scale
+            centerOffset = .zero
+        case .actualSize:
+            // 1シーンpx = 1デバイスpx
+            quadWidthPx = sceneWidth
+            quadHeightPx = sceneHeight
+            centerOffset = pan
+        }
+
+        let ndcHalfWidth = Float(quadWidthPx / drawableSize.width)
+        let ndcHalfHeight = Float(quadHeightPx / drawableSize.height)
+        let ndcCenterX = Float(2 * centerOffset.x / drawableSize.width)
+        let ndcCenterY = Float(2 * centerOffset.y / drawableSize.height)
 
         // コーナー順: 左下・右下・左上・右上（triangle strip）
         let uv = Self.cornerUVs(for: orientation)
         var vertices: [SIMD4<Float>] = [
-            SIMD4(-ndcWidth, -ndcHeight, uv[0].x, uv[0].y),
-            SIMD4(ndcWidth, -ndcHeight, uv[1].x, uv[1].y),
-            SIMD4(-ndcWidth, ndcHeight, uv[2].x, uv[2].y),
-            SIMD4(ndcWidth, ndcHeight, uv[3].x, uv[3].y),
+            SIMD4(ndcCenterX - ndcHalfWidth, ndcCenterY - ndcHalfHeight, uv[0].x, uv[0].y),
+            SIMD4(ndcCenterX + ndcHalfWidth, ndcCenterY - ndcHalfHeight, uv[1].x, uv[1].y),
+            SIMD4(ndcCenterX - ndcHalfWidth, ndcCenterY + ndcHalfHeight, uv[2].x, uv[2].y),
+            SIMD4(ndcCenterX + ndcHalfWidth, ndcCenterY + ndcHalfHeight, uv[3].x, uv[3].y),
         ]
 
         let passDescriptor = MTLRenderPassDescriptor()

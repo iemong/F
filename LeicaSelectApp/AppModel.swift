@@ -6,6 +6,23 @@ import QuartzCore
 import XMPKit
 import os
 
+enum ZoomMode {
+    case fit
+    /// 100%ピクセル等倍（1シーンpx = 1デバイスpx）
+    case actualSize
+}
+
+enum ViewMode {
+    case grid
+    case single
+}
+
+/// キャッシュキー: 通常表示(display)と100%等倍用フル解像(full)を区別する
+struct FrameKey: Hashable, Sendable {
+    let url: URL
+    let full: Bool
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -14,6 +31,10 @@ final class AppModel {
     private(set) var currentFrame: PresentedFrame?
     private(set) var statusText = ""
     private(set) var latencyText = ""
+    private(set) var viewMode: ViewMode = .single
+    private(set) var zoomMode: ZoomMode = .fit
+    /// グリッドの列数（ビュー側のレイアウトから通知される。上下キー移動に使う）
+    var gridColumns = 5
     /// URL → レート（1-5、-1=除外。0/未登録=なし）。XMPサイドカーと同期
     private(set) var ratings: [URL: Int] = [:]
 
@@ -30,12 +51,22 @@ final class AppModel {
         return rating == -1 ? "✕ 除外" : String(repeating: "★", count: rating)
     }
 
-    private var currentURL: URL? {
+    var zoomText: String {
+        guard viewMode == .single, zoomMode == .actualSize else { return "" }
+        let resolved = currentFrame?.frame.isFullResolution == true
+        return resolved ? "100%" : "100%(展開中…)"
+    }
+
+    var currentURL: URL? {
         files.indices.contains(currentIndex) ? files[currentIndex] : nil
     }
 
-    /// テクスチャキャッシュ（上限2GB、コスト=テクスチャバイト数）
-    @ObservationIgnored private let cache = LRUByteCache<URL, TextureFrame>(
+    /// グリッドのサムネイル供給（LRU 320MB）
+    @ObservationIgnored let thumbnails = ThumbnailProvider()
+
+    /// テクスチャキャッシュ（上限2GB、コスト=テクスチャバイト数）。
+    /// 通常表示とフル解像（等倍用）を FrameKey で区別して同居させる
+    @ObservationIgnored private let cache = LRUByteCache<FrameKey, TextureFrame>(
         byteLimit: 2 * 1024 * 1024 * 1024
     ) { $0.byteCost }
 
@@ -111,8 +142,15 @@ final class AppModel {
         statusText = files.isEmpty ? "DNGが見つかりません" : ""
         latencyText = ""
         ratings = [:]
+        zoomMode = .fit
         if !files.isEmpty {
-            loadCurrent()
+            // 仕様: フォルダを開く → サムネグリッド（autotestは1枚表示で計測）
+            if isAutotest {
+                viewMode = .single
+                loadCurrent()
+            } else {
+                viewMode = .grid
+            }
             restoreRatings(for: files)
         }
     }
@@ -142,6 +180,9 @@ final class AppModel {
         guard newIndex != currentIndex else { return }
         currentIndex = newIndex
 
+        // グリッド中は選択移動のみ（重いロードはしない）
+        guard viewMode == .single else { return }
+
         // ホットミラーにあれば同一ランループで表示確定（先読みヒットの高速経路）
         let url = files[currentIndex]
         if let hot = hotFrames[url] {
@@ -159,12 +200,80 @@ final class AppModel {
             let cache = cache
             Task { [weak self] in
                 // LRUの使用時刻とヒット統計を更新（実体は既にキャッシュ内）
-                _ = try? await cache.value(for: url) { hot }
+                _ = try? await cache.value(for: FrameKey(url: url, full: false)) { hot }
                 await self?.schedulePrefetch()
+            }
+            if zoomMode == .actualSize {
+                ensureFullResolution()
             }
             return
         }
         loadCurrent()
+    }
+
+    /// グリッド: 上下キーで1行分移動
+    func moveSelectionVertically(_ rows: Int) {
+        guard viewMode == .grid, !files.isEmpty else { return }
+        let newIndex = min(max(currentIndex + rows * gridColumns, 0), files.count - 1)
+        currentIndex = newIndex
+    }
+
+    func select(_ index: Int) {
+        guard files.indices.contains(index) else { return }
+        currentIndex = index
+    }
+
+    /// グリッドから1枚表示へ
+    func openSelected() {
+        guard !files.isEmpty else { return }
+        viewMode = .single
+        loadCurrent()
+    }
+
+    /// 1枚表示からグリッドへ
+    func showGrid() {
+        guard viewMode == .single else { return }
+        viewMode = .grid
+        zoomMode = .fit
+    }
+
+    /// Z / Space（1枚表示時）: fit ⇔ 100%等倍
+    func toggleZoom() {
+        guard viewMode == .single else { return }
+        zoomMode = zoomMode == .fit ? .actualSize : .fit
+        renderView?.setZoomMode(zoomMode)
+        if zoomMode == .actualSize {
+            ensureFullResolution()
+        }
+    }
+
+    /// 表示中フレームがフル解像でなければ（M262のハーフサイズ）、
+    /// フルデモザイクを遅延実行して差し替える
+    private func ensureFullResolution() {
+        guard let url = currentURL,
+            let presented = currentFrame, !presented.frame.isFullResolution
+        else { return }
+        let requested = generation
+        let cache = cache
+        Task { [weak self] in
+            guard
+                let frame = try? await cache.value(for: FrameKey(url: url, full: true), loader: {
+                    try Task.checkCancellation()
+                    let cpu = try ImagePipeline.loadFullResolutionFrame(from: url)
+                    return try TextureFactory.makeFrame(from: cpu)
+                })
+            else { return }
+            self?.swapToFullResolution(frame, requested: requested)
+        }
+    }
+
+    private func swapToFullResolution(_ frame: TextureFrame, requested: Int) {
+        // 差し替え前にユーザーが移動/ズーム解除していたら破棄
+        guard requested == generation, zoomMode == .actualSize else { return }
+        generation += 1
+        let presented = PresentedFrame(generation: generation, frame: frame)
+        currentFrame = presented
+        renderView?.show(presented)
     }
 
     /// レートキーの処理。"1"-"5"=レート / "0"=クリア / "x"=除外トグル
@@ -239,7 +348,7 @@ final class AppModel {
         Task { [weak self] in
             let result: Result<TextureFrame, any Error>
             do {
-                let frame = try await cache.value(for: url) {
+                let frame = try await cache.value(for: FrameKey(url: url, full: false)) {
                     try Task.checkCancellation()
                     let cpu = try ImagePipeline.loadDisplayFrame(from: url)
                     return try TextureFactory.makeFrame(from: cpu)
@@ -268,6 +377,9 @@ final class AppModel {
             if files.indices.contains(currentIndex) {
                 storeHotFrame(frame, for: files[currentIndex])
             }
+            if zoomMode == .actualSize {
+                ensureFullResolution()
+            }
         case .failure(let error):
             statusText = "読み込み失敗: \(error)"
         }
@@ -280,12 +392,12 @@ final class AppModel {
         // 前方優先の順序で並べる
         let candidates = [currentIndex + 1, currentIndex - 1, currentIndex + 2]
             .filter { files.indices.contains($0) }
-        let keep = Set(candidates.map { files[$0] })
+        let keep = Set(candidates.map { FrameKey(url: files[$0], full: false) })
         await cache.cancelPrefetches(keeping: keep)
         trimHotFrames()
         for index in candidates {
             let url = files[index]
-            let task = await cache.prefetch(key: url) {
+            let task = await cache.prefetch(key: FrameKey(url: url, full: false)) {
                 try Task.checkCancellation()
                 let cpu = try ImagePipeline.loadDisplayFrame(from: url)
                 return try TextureFactory.makeFrame(from: cpu)

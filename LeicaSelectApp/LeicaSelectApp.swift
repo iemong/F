@@ -27,20 +27,24 @@ struct ContentView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            if let presented = model.currentFrame {
-                MetalImageView(
-                    presented: presented,
-                    onPresent: { id, time in model.frameDidPresent(id: id, presentedTime: time) },
-                    register: { view in model.registerRenderView(view) }
-                )
-                .ignoresSafeArea()
-            } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "photo.stack")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.secondary)
-                    Text("⌘O でDNGのあるフォルダを開く")
-                        .foregroundStyle(.secondary)
+            switch model.viewMode {
+            case .grid:
+                if model.files.isEmpty {
+                    emptyState
+                } else {
+                    GridView(model: model)
+                }
+            case .single:
+                if let presented = model.currentFrame {
+                    MetalImageView(
+                        presented: presented,
+                        zoomMode: model.zoomMode,
+                        onPresent: { id, time in model.frameDidPresent(id: id, presentedTime: time) },
+                        register: { view in model.registerRenderView(view) }
+                    )
+                    .ignoresSafeArea()
+                } else {
+                    emptyState
                 }
             }
 
@@ -63,6 +67,42 @@ struct ContentView: View {
             model.navigate(1)
             return .handled
         }
+        .onKeyPress(.upArrow) {
+            model.moveSelectionVertically(-1)
+            return model.viewMode == .grid ? .handled : .ignored
+        }
+        .onKeyPress(.downArrow) {
+            model.moveSelectionVertically(1)
+            return model.viewMode == .grid ? .handled : .ignored
+        }
+        .onKeyPress(.return) {
+            guard model.viewMode == .grid else { return .ignored }
+            model.openSelected()
+            return .handled
+        }
+        .onKeyPress(.space) {
+            switch model.viewMode {
+            case .grid: model.openSelected()
+            case .single: model.toggleZoom()
+            }
+            return .handled
+        }
+        .onKeyPress(.escape) {
+            guard model.viewMode == .single else { return .ignored }
+            model.showGrid()
+            return .handled
+        }
+        .onKeyPress(keys: ["z"]) { _ in
+            model.toggleZoom()
+            return .handled
+        }
+        .onKeyPress(keys: ["g"]) { _ in
+            switch model.viewMode {
+            case .single: model.showGrid()
+            case .grid: model.openSelected()
+            }
+            return .handled
+        }
         .onKeyPress(keys: ["1", "2", "3", "4", "5", "0", "x"]) { press in
             model.handleRatingKey(press.characters)
             return .handled
@@ -73,19 +113,37 @@ struct ContentView: View {
         }
     }
 
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "photo.stack")
+                .font(.system(size: 48))
+                .foregroundStyle(.secondary)
+            Text("⌘O でDNGのあるフォルダを開く")
+                .foregroundStyle(.secondary)
+        }
+    }
+
     private var statusBar: some View {
         HStack(spacing: 12) {
             if !model.positionText.isEmpty {
                 Text(model.positionText)
             }
-            if !model.fileNameText.isEmpty {
+            if model.viewMode == .grid {
+                if let url = model.currentURL {
+                    Text(url.lastPathComponent)
+                }
+            } else if !model.fileNameText.isEmpty {
                 Text(model.fileNameText)
             }
             if !model.ratingText.isEmpty {
                 Text(model.ratingText)
                     .foregroundStyle(model.ratingText.hasPrefix("✕") ? .red : .yellow)
             }
-            if !model.latencyText.isEmpty {
+            if !model.zoomText.isEmpty {
+                Text(model.zoomText)
+                    .foregroundStyle(.cyan)
+            }
+            if model.viewMode == .single, !model.latencyText.isEmpty {
                 Text(model.latencyText)
                     .foregroundStyle(.green)
             }

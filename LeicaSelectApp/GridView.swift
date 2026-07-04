@@ -1,0 +1,99 @@
+import SwiftUI
+
+/// サムネイルグリッド。セルは遅延生成（表示された分だけデコード）
+struct GridView: View {
+    let model: AppModel
+
+    private static let cellSize: CGFloat = 196
+
+    var body: some View {
+        GeometryReader { geometry in
+            let columns = max(2, Int(geometry.size.width / Self.cellSize))
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVGrid(
+                        columns: Array(
+                            repeating: GridItem(.flexible(), spacing: 8), count: columns),
+                        spacing: 8
+                    ) {
+                        ForEach(Array(model.files.enumerated()), id: \.element) { index, url in
+                            ThumbnailCell(
+                                url: url,
+                                isSelected: index == model.currentIndex,
+                                rating: model.ratings[url] ?? 0,
+                                provider: model.thumbnails
+                            )
+                            .id(url)
+                            .onTapGesture(count: 2) {
+                                model.select(index)
+                                model.openSelected()
+                            }
+                            .onTapGesture {
+                                model.select(index)
+                            }
+                        }
+                    }
+                    .padding(8)
+                }
+                .onChange(of: model.currentIndex) { _, newIndex in
+                    guard model.files.indices.contains(newIndex) else { return }
+                    proxy.scrollTo(model.files[newIndex])
+                }
+            }
+            .onAppear { model.gridColumns = columns }
+            .onChange(of: columns) { _, newValue in model.gridColumns = newValue }
+        }
+        .background(Color.black)
+    }
+}
+
+struct ThumbnailCell: View {
+    let url: URL
+    let isSelected: Bool
+    let rating: Int
+    let provider: ThumbnailProvider
+
+    @State private var thumbnail: ThumbImage?
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            Rectangle()
+                .fill(Color(white: 0.12))
+                .aspectRatio(1, contentMode: .fit)
+                .overlay {
+                    if let thumbnail {
+                        Image(decorative: thumbnail.cgImage, scale: 1)
+                            .resizable()
+                            .scaledToFit()
+                            .rotationEffect(.degrees(thumbnail.rotationDegrees))
+                            .padding(4)
+                    }
+                }
+                .clipped()
+
+            HStack(spacing: 6) {
+                if rating == -1 {
+                    Text("✕")
+                        .foregroundStyle(.red)
+                } else if rating > 0 {
+                    Text(String(repeating: "★", count: rating))
+                        .foregroundStyle(.yellow)
+                }
+                Text(url.lastPathComponent)
+                    .foregroundStyle(.white.opacity(0.75))
+                    .lineLimit(1)
+            }
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .padding(4)
+            .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 4))
+            .padding(4)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 3)
+        )
+        .task(id: url) {
+            thumbnail = await provider.image(for: url)
+        }
+    }
+}
