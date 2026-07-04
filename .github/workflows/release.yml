@@ -1,0 +1,50 @@
+name: Release
+
+# v* タグのpushでDMGをビルドしてGitHub Releaseに添付する。
+# CIでは ad-hoc署名（Developer ID署名・公証はローカルで実施して
+# 同名アセットを差し替える運用も可）
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: DMGビルドとRelease作成
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: バージョン抽出
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: パッケージテスト
+        run: |
+          for pkg in DNGKit DecodeKit CacheKit XMPKit; do
+            swift test --package-path "Packages/$pkg"
+          done
+
+      - name: アプリビルド (Release)
+        run: |
+          xcodebuild -project F.xcodeproj -scheme F -configuration Release \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO build
+
+      - name: DMG作成
+        run: |
+          APP="build/DerivedData/Build/Products/Release/F.app"
+          mkdir -p dmgroot
+          cp -R "$APP" dmgroot/
+          ln -s /Applications dmgroot/Applications
+          hdiutil create -volname "F ${{ steps.version.outputs.version }}" \
+            -srcfolder dmgroot -ov -format UDZO \
+            "F-${{ steps.version.outputs.version }}.dmg"
+
+      - name: Release作成 + DMG添付
+        uses: softprops/action-gh-release@v2
+        with:
+          files: F-*.dmg
+          generate_release_notes: true
