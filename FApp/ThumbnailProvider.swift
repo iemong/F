@@ -28,6 +28,9 @@ final class ThumbnailProvider: Sendable {
     }
 
     private static func makeThumbnail(for url: URL) throws -> ThumbImage {
+        if url.isJPEGFile {
+            return try makeJPEGThumbnail(for: url)
+        }
         let file = try DNGFile(contentsOf: url)
         // セルサイズ(~200pt=400px)を満たす最小のプレビューを選ぶ
         guard
@@ -54,5 +57,20 @@ final class ThumbnailProvider: Sendable {
             default: 0
             }
         return ThumbImage(cgImage: thumbnail, rotationDegrees: rotation)
+    }
+
+    /// JPGはImageIOがExif orientationを織り込んでくれる（WithTransform）ので回転は0
+    private static func makeJPEGThumbnail(for url: URL) throws -> ThumbImage {
+        let options =
+            [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 480,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+            ] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+            let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options)
+        else { throw ImagePipelineError.undecodable("JPGサムネ生成失敗") }
+        return ThumbImage(cgImage: thumbnail, rotationDegrees: 0)
     }
 }

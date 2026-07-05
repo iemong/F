@@ -15,6 +15,8 @@ struct FilmstripView: View {
                             isCurrent: index == model.currentIndex,
                             rating: model.ratings[url] ?? 0,
                             label: model.labels[url],
+                            typeBadge: model.fileTypeMode == .both
+                                ? url.pathExtension.uppercased() : nil,
                             provider: model.thumbnails
                         )
                         .id(url)
@@ -45,6 +47,8 @@ struct FilmstripCell: View {
     let isCurrent: Bool
     let rating: Int
     let label: String?
+    /// 両方モードのときだけ拡張子を出してペアを見分ける（それ以外は nil）
+    let typeBadge: String?
     let provider: ThumbnailProvider
 
     @State private var thumbnail: ThumbImage?
@@ -81,6 +85,17 @@ struct FilmstripCell: View {
         }
         .frame(width: 60, height: 60)
         .opacity(rating == -1 ? 0.4 : 1)
+        .overlay(alignment: .topTrailing) {
+            if let typeBadge {
+                Text(typeBadge)
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 1)
+                    .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 3))
+                    .padding(2)
+            }
+        }
         .overlay(
             RoundedRectangle(cornerRadius: 3)
                 .stroke(isCurrent ? Color.accentColor : .clear, lineWidth: 2)

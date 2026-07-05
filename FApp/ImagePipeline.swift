@@ -25,13 +25,26 @@ enum ImagePipelineError: Error {
     case undecodable(String)
 }
 
-/// DNGファイル → 表示用RGBA。機種別の最適経路を選ぶ:
-/// - 原寸級JPEG内蔵（Q3）→ 抽出して ImageIO でデコード
-/// - それ以外（M262）→ LJ92 + ハーフサイズ縮約
+extension URL {
+    /// 拡張子ベースのJPG判定（表示対象の列挙・デコード経路の分岐で共用）
+    var isJPEGFile: Bool {
+        let ext = pathExtension.uppercased()
+        return ext == "JPG" || ext == "JPEG"
+    }
+}
+
+/// 画像ファイル → 表示用RGBA。種別・機種別の最適経路を選ぶ:
+/// - JPG → そのまま ImageIO でデコード（常にフル解像扱い）
+/// - 原寸級JPEG内蔵のDNG（Q3）→ 抽出して ImageIO でデコード
+/// - それ以外のDNG（M262）→ LJ92 + ハーフサイズ縮約
 enum ImagePipeline {
     static func loadDisplayFrame(from url: URL) throws -> DisplayFrame {
         let clock = ContinuousClock()
         let start = clock.now
+
+        if url.isJPEGFile {
+            return try loadJPEGFile(from: url, since: start, clock: clock)
+        }
 
         let file = try DNGFile(contentsOf: url)
 
@@ -70,6 +83,10 @@ enum ImagePipeline {
         let clock = ContinuousClock()
         let start = clock.now
 
+        if url.isJPEGFile {
+            return try loadJPEGFile(from: url, since: start, clock: clock)
+        }
+
         let file = try DNGFile(contentsOf: url)
 
         if let preview = file.largestPreview, preview.kind == .fullsize,
@@ -98,6 +115,36 @@ enum ImagePipeline {
             isFullResolution: true,
             sceneWidth: image.width,
             sceneHeight: image.height)
+    }
+
+    /// 単体のJPGファイル。JPGはそれ自体が最終画像なので常にフル解像扱い。
+    /// Orientation はExifから読み、DNGと同じくテクスチャには焼かずUV割当で正立させる
+    private static func loadJPEGFile(
+        from url: URL, since start: ContinuousClock.Instant, clock: ContinuousClock
+    ) throws -> DisplayFrame {
+        let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+        guard let decoded = decodeJPEGToRGBA(data) else {
+            throw ImagePipelineError.undecodable("JPGデコード失敗")
+        }
+        return DisplayFrame(
+            pixelWidth: decoded.width,
+            pixelHeight: decoded.height,
+            rgba: decoded.pixels,
+            orientation: jpegOrientation(data),
+            fileName: url.lastPathComponent,
+            decodeDuration: clock.now - start,
+            isFullResolution: true,
+            sceneWidth: decoded.width,
+            sceneHeight: decoded.height)
+    }
+
+    private static func jpegOrientation(_ data: Data) -> Orientation {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+            let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                as? [CFString: Any],
+            let raw = props[kCGImagePropertyOrientation] as? UInt32
+        else { return .topLeft }
+        return Orientation(rawValue: UInt16(clamping: raw)) ?? .topLeft
     }
 
     private static func decodeJPEGToRGBA(_ data: Data)

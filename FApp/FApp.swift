@@ -227,6 +227,20 @@ struct ContentView: View {
                 .help("SDカード / 外部ボリュームを開く")
             }
             ToolbarItem {
+                Picker(
+                    "種別",
+                    selection: Binding(
+                        get: { model.fileTypeMode },
+                        set: { model.setFileTypeMode($0) })
+                ) {
+                    ForEach(FileTypeMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .help("表示するファイル種別（DNG / JPG / 両方）")
+            }
+            ToolbarItem {
                 filterMenu
             }
             ToolbarItem {

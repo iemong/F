@@ -1,5 +1,6 @@
 import DNGKit
 import Foundation
+import ImageIO
 import SwiftUI
 
 /// 撮影情報パネル（Iキー）に出す内容。DNGヘッダのIFD走査だけで得られる軽量情報
@@ -18,14 +19,49 @@ actor CaptureInfoProvider {
 
     func info(for url: URL) -> CaptureInfo? {
         if let cached = cache[url] { return cached }
+        guard let info = url.isJPEGFile ? Self.jpegInfo(for: url) : Self.dngInfo(for: url)
+        else { return nil }
+        cache[url] = info
+        return info
+    }
+
+    private static func dngInfo(for url: URL) -> CaptureInfo? {
         guard let file = try? DNGFile(contentsOf: url) else { return nil }
-        let info = CaptureInfo(
+        return CaptureInfo(
             capture: file.capture,
             cameraModel: file.model,
             sensorPixelSize: file.raw?.pixelSize,
             fileByteCount: try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize)
-        cache[url] = info
-        return info
+    }
+
+    /// JPGはImageIOのプロパティ辞書からExifを読み、DNGと同じ型に揃える
+    private static func jpegInfo(for url: URL) -> CaptureInfo? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+            let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                as? [CFString: Any]
+        else { return nil }
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+
+        var pixelSize: PixelSize?
+        if let w = props[kCGImagePropertyPixelWidth] as? Int,
+            let h = props[kCGImagePropertyPixelHeight] as? Int
+        {
+            pixelSize = PixelSize(width: w, height: h)
+        }
+        let capture = CaptureMetadata(
+            exposureTimeSeconds: exif?[kCGImagePropertyExifExposureTime] as? Double,
+            fNumber: exif?[kCGImagePropertyExifFNumber] as? Double,
+            iso: (exif?[kCGImagePropertyExifISOSpeedRatings] as? [Int])?.first,
+            focalLengthMM: exif?[kCGImagePropertyExifFocalLength] as? Double,
+            lensModel: exif?[kCGImagePropertyExifLensModel] as? String,
+            dateTimeOriginal: exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
+            exposureBiasEV: exif?[kCGImagePropertyExifExposureBiasValue] as? Double)
+        return CaptureInfo(
+            capture: capture,
+            cameraModel: tiff?[kCGImagePropertyTIFFModel] as? String,
+            sensorPixelSize: pixelSize,
+            fileByteCount: try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize)
     }
 }
 

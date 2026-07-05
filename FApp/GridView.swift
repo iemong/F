@@ -77,6 +77,16 @@ struct GridView: View {
             }
             .onAppear { model.gridColumns = columns }
             .onChange(of: columns) { _, newValue in model.gridColumns = newValue }
+            .overlay {
+                if model.visibleFiles.isEmpty {
+                    Text(
+                        model.filter.isActive
+                            ? "フィルター条件に合うファイルがありません"
+                            : "\(model.fileTypeMode.displayName)のファイルがありません（ツールバーで種別を切替）"
+                    )
+                    .foregroundStyle(.secondary)
+                }
+            }
             .overlay(alignment: .bottomTrailing) {
                 sizeControl
             }

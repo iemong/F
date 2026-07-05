@@ -50,6 +50,30 @@ enum ColorLabel {
     ]
 }
 
+/// 表示するファイル種別（ツールバーで切替、UserDefaultsに永続化）。
+/// DNG+JPG同時記録のフォルダで片方だけを見たいケースに応える
+enum FileTypeMode: String, CaseIterable {
+    case dng
+    case jpg
+    case both
+
+    var displayName: String {
+        switch self {
+        case .dng: "DNG"
+        case .jpg: "JPG"
+        case .both: "両方"
+        }
+    }
+
+    func matches(_ url: URL) -> Bool {
+        switch self {
+        case .dng: !url.isJPEGFile
+        case .jpg: url.isJPEGFile
+        case .both: true
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -78,6 +102,13 @@ final class AppModel {
     var showFilmstrip = true {
         didSet {
             UserDefaults.standard.set(showFilmstrip, forKey: "showFilmstrip")
+        }
+    }
+    /// 表示するファイル種別（UserDefaultsに永続化、既定はDNGのみ）。
+    /// 変更は setFileTypeMode 経由（選択位置の引き継ぎがあるため）
+    private(set) var fileTypeMode: FileTypeMode = .dng {
+        didSet {
+            UserDefaults.standard.set(fileTypeMode.rawValue, forKey: "fileTypeMode")
         }
     }
     private(set) var currentFolder: URL?
@@ -109,10 +140,16 @@ final class AppModel {
     /// 除外(✕)のゴミ箱移動の確認ダイアログ
     var isConfirmingTrash = false
 
-    /// フィルター適用後の表示・送り対象。グリッドとナビゲーションはこちらを使う
+    /// ファイル種別モード適用後の全ファイル。「全n件」表示やエクスポート対象の基底
+    var typedFiles: [URL] {
+        fileTypeMode == .both ? files : files.filter { fileTypeMode.matches($0) }
+    }
+
+    /// 種別モード+フィルター適用後の表示・送り対象。グリッドとナビゲーションはこちらを使う
     var visibleFiles: [URL] {
-        guard filter.isActive else { return files }
-        return files.filter { passesFilter($0) }
+        let base = typedFiles
+        guard filter.isActive else { return base }
+        return base.filter { passesFilter($0) }
     }
 
     private func passesFilter(_ url: URL) -> Bool {
@@ -130,7 +167,7 @@ final class AppModel {
         let visible = visibleFiles
         guard !visible.isEmpty || filter.isActive else { return "" }
         let base = visible.isEmpty ? "0/0" : "\(currentIndex + 1)/\(visible.count)"
-        return filter.isActive ? base + " (全\(files.count))" : base
+        return filter.isActive ? base + " (全\(typedFiles.count))" : base
     }
 
     var fileNameText: String {
@@ -186,10 +223,12 @@ final class AppModel {
             .split(whereSeparator: { $0 == "," || $0 == "、" })
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && seen.insert($0).inserted }
-        if parsed.isEmpty {
-            keywords.removeValue(forKey: url)
-        } else {
-            keywords[url] = parsed
+        for member in pairURLs(of: url) {
+            if parsed.isEmpty {
+                keywords.removeValue(forKey: member)
+            } else {
+                keywords[member] = parsed
+            }
         }
         Task.detached(priority: .utility) { [weak self] in
             do {
@@ -209,17 +248,40 @@ final class AppModel {
         guard newFilter != filter else { return }
         let selected = currentURL
         filter = newFilter
+        reselect(previous: selected)
+    }
+
+    /// ファイル種別モードの切替。選択中のファイルが消える場合は
+    /// 同basenameのペア相手（DNG⇔JPG）へ選択を引き継ぐ
+    func setFileTypeMode(_ mode: FileTypeMode) {
+        guard mode != fileTypeMode else { return }
+        let selected = currentURL
+        fileTypeMode = mode
+        reselect(previous: selected)
+    }
+
+    /// 表示対象リストが変わった後（フィルター/種別切替）の選択位置の整合
+    private func reselect(previous selected: URL?) {
         let visible = visibleFiles
-        if let selected, let index = visible.firstIndex(of: selected) {
-            currentIndex = index
-        } else {
-            currentIndex = min(max(0, currentIndex), max(0, visible.count - 1))
-            if viewMode == .single {
-                if visible.isEmpty {
-                    viewMode = .grid
-                } else {
-                    loadCurrent()
-                }
+        if let selected {
+            if let index = visible.firstIndex(of: selected) {
+                currentIndex = index
+                return
+            }
+            // 同一ショットのペア相手（同basename）が残っていればそちらへ
+            let base = selected.deletingPathExtension()
+            if let index = visible.firstIndex(where: { $0.deletingPathExtension() == base }) {
+                currentIndex = index
+                if viewMode == .single { loadCurrent() }
+                return
+            }
+        }
+        currentIndex = min(max(0, currentIndex), max(0, visible.count - 1))
+        if viewMode == .single {
+            if visible.isEmpty {
+                viewMode = .grid
+            } else {
+                loadCurrent()
             }
         }
     }
@@ -286,6 +348,11 @@ final class AppModel {
         if UserDefaults.standard.object(forKey: "showFilmstrip") != nil {
             showFilmstrip = UserDefaults.standard.bool(forKey: "showFilmstrip")
         }
+        if let saved = UserDefaults.standard.string(forKey: "fileTypeMode"),
+            let mode = FileTypeMode(rawValue: saved)
+        {
+            fileTypeMode = mode
+        }
 
         let arguments = CommandLine.arguments
         isAutotest = arguments.contains("--autotest")
@@ -335,20 +402,22 @@ final class AppModel {
         // SDカードは DCIM/100LEICA/ のようにサブフォルダに入るため再帰で探す。
         // 大きいツリーやUSB越しでも固まらないよう列挙はバックグラウンド
         Task.detached(priority: .userInitiated) { [weak self] in
-            let found = Self.findDNGs(in: url)
+            let found = Self.findImages(in: url)
             await self?.applyFolderContents(found, for: url)
         }
     }
 
-    /// 再帰的にDNGを列挙（隠しファイル・パッケージ内は除外、上限1万件）
-    private nonisolated static func findDNGs(in root: URL) -> [URL] {
+    /// 再帰的にDNG/JPGを列挙（隠しファイル・パッケージ内は除外、上限1万件）。
+    /// 種別の絞り込みは列挙ではなく表示側（typedFiles）で行い、切替時の再走査を不要にする
+    private nonisolated static func findImages(in root: URL) -> [URL] {
+        let wanted: Set<String> = ["DNG", "JPG", "JPEG"]
         var result: [URL] = []
         let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants])
         while let item = enumerator?.nextObject() as? URL {
-            if item.pathExtension.uppercased() == "DNG" {
+            if wanted.contains(item.pathExtension.uppercased()) {
                 result.append(item)
                 if result.count >= 10_000 { break }
             }
@@ -359,7 +428,7 @@ final class AppModel {
     private func applyFolderContents(_ found: [URL], for url: URL) {
         guard currentFolder == url else { return } // 列挙中に別フォルダへ移動した
         files = found
-        statusText = files.isEmpty ? "DNGが見つかりません" : ""
+        statusText = files.isEmpty ? "DNG/JPGが見つかりません" : ""
         if !files.isEmpty {
             addRecentFolder(url)
             // 仕様: フォルダを開く → サムネグリッド（autotestは1枚表示で計測）
@@ -585,14 +654,24 @@ final class AppModel {
         }
     }
 
+    /// 同basename（=同一ショットのDNG+JPGペア）の全URL。
+    /// サイドカーは basename.xmp をペアで共有するため、レート等のメモリ状態も
+    /// ペアでまとめて更新する（片方だけ更新すると再起動後の復元結果とズレる）
+    private func pairURLs(of url: URL) -> [URL] {
+        let base = url.deletingPathExtension()
+        return files.filter { $0.deletingPathExtension() == base }
+    }
+
     /// カラーラベルを適用（同じ色を再指定でトグル解除）してサイドカーへ書き込み
     private func applyLabel(_ label: String) {
         guard let url = currentURL else { return }
         let new: String? = labels[url] == label ? nil : label
-        if let new {
-            labels[url] = new
-        } else {
-            labels.removeValue(forKey: url)
+        for member in pairURLs(of: url) {
+            if let new {
+                labels[member] = new
+            } else {
+                labels.removeValue(forKey: member)
+            }
         }
         Task.detached(priority: .utility) { [weak self] in
             do {
@@ -609,7 +688,9 @@ final class AppModel {
         let current = ratings[url] ?? 0
         let new = (rating == -1 && current == -1) ? 0 : rating
         guard new != current else { return }
-        ratings[url] = new
+        for member in pairURLs(of: url) {
+            ratings[member] = new
+        }
 
         // クリアかつサイドカー未作成なら、わざわざファイルを作らない
         if new == 0, !FileManager.default.fileExists(atPath: XMPSidecar.url(for: url).path) {
@@ -630,17 +711,18 @@ final class AppModel {
 
     // MARK: - エクスポート（⌘E）
 
-    /// scope に該当するエクスポート対象。件数プレビューにも使う
+    /// scope に該当するエクスポート対象。件数プレビューにも使う。
+    /// 種別モードで隠れているファイルは対象にしない
     func exportURLs(for scope: ExportScope) -> [URL] {
         switch scope {
         case .visible:
             visibleFiles
         case .minRating(let n):
-            files.filter { (ratings[$0] ?? 0) >= n }
+            typedFiles.filter { (ratings[$0] ?? 0) >= n }
         case .label(let wanted):
-            files.filter { labels[$0] == wanted }
+            typedFiles.filter { labels[$0] == wanted }
         case .keyword(let wanted):
-            files.filter { keywords[$0]?.contains(wanted) ?? false }
+            typedFiles.filter { keywords[$0]?.contains(wanted) ?? false }
         }
     }
 
@@ -702,14 +784,22 @@ final class AppModel {
     // MARK: - 除外(✕)のゴミ箱移動
 
     var rejectedCount: Int {
-        files.count(where: { ratings[$0] == -1 })
+        typedFiles.count(where: { ratings[$0] == -1 })
     }
 
-    /// 除外を付けたDNGとそのXMPサイドカーをゴミ箱へ移動する（ゴミ箱から復元可能）。
-    /// 元のDNGへの「書き込み」はしないという不変条件は保ったまま、ファイル単位で移動する
+    /// 除外を付けたファイルとそのXMPサイドカーをゴミ箱へ移動する（ゴミ箱から復元可能）。
+    /// 元画像への「書き込み」はしないという不変条件は保ったまま、ファイル単位で移動する。
+    /// 種別モードで隠れているファイルは対象にしない（見えていないものは消さない）
     func trashRejected() {
-        let rejected = files.filter { ratings[$0] == -1 }
+        let rejected = typedFiles.filter { ratings[$0] == -1 }
         guard !rejected.isEmpty else { return }
+        // 共有サイドカー（basename.xmp）は、ペア相手（DNG⇔JPG）が1つでも残るなら
+        // 残す。捨てられる側と一緒に消すと残った側のレート等が失われるため
+        let rejectedSet = Set(rejected)
+        let trashableSidecars = Set(
+            rejected
+                .filter { url in pairURLs(of: url).allSatisfy { rejectedSet.contains($0) } }
+                .map { XMPSidecar.url(for: $0) })
         Task.detached(priority: .userInitiated) { [weak self] in
             let fm = FileManager.default
             var trashed: [URL] = []
@@ -718,7 +808,9 @@ final class AppModel {
                 do {
                     try fm.trashItem(at: url, resultingItemURL: nil)
                     let sidecar = XMPSidecar.url(for: url)
-                    if fm.fileExists(atPath: sidecar.path) {
+                    if trashableSidecars.contains(sidecar),
+                        fm.fileExists(atPath: sidecar.path)
+                    {
                         try? fm.trashItem(at: sidecar, resultingItemURL: nil)
                     }
                     trashed.append(url)
@@ -879,7 +971,9 @@ final class AppModel {
         switch autotestPhase {
         case .forward:
             pass1Latencies.append(ms)
-            if currentIndex + 1 < files.count {
+            // 終端は送り対象（visibleFiles）で判定する。files で判定すると
+            // 種別モードで一部が隠れているとき終端に到達せずハングする
+            if currentIndex + 1 < visibleFiles.count {
                 navigate(1)
             } else {
                 autotestPhase = .backward
