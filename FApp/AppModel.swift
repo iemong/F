@@ -100,6 +100,15 @@ final class AppModel {
     var isEditingKeywords = false
     var keywordDraft = ""
 
+    /// エクスポートシート（⌘E）
+    var isExportSheetPresented = false
+    /// nil = エクスポート実行中でない
+    private(set) var exportProgress: ExportProgress?
+    @ObservationIgnored private var exportTask: Task<Void, Never>?
+
+    /// 除外(✕)のゴミ箱移動の確認ダイアログ
+    var isConfirmingTrash = false
+
     /// フィルター適用後の表示・送り対象。グリッドとナビゲーションはこちらを使う
     var visibleFiles: [URL] {
         guard filter.isActive else { return files }
@@ -617,6 +626,135 @@ final class AppModel {
 
     private func reportRatingError(_ error: any Error, for url: URL) {
         statusText = "XMP書き込み失敗 (\(url.lastPathComponent)): \(error)"
+    }
+
+    // MARK: - エクスポート（⌘E）
+
+    /// scope に該当するエクスポート対象。件数プレビューにも使う
+    func exportURLs(for scope: ExportScope) -> [URL] {
+        switch scope {
+        case .visible:
+            visibleFiles
+        case .minRating(let n):
+            files.filter { (ratings[$0] ?? 0) >= n }
+        case .label(let wanted):
+            files.filter { labels[$0] == wanted }
+        case .keyword(let wanted):
+            files.filter { keywords[$0]?.contains(wanted) ?? false }
+        }
+    }
+
+    func beginExport() {
+        guard !files.isEmpty, exportProgress == nil else { return }
+        isExportSheetPresented = true
+    }
+
+    /// 書き出し先を選ばせてコピーを開始。同名ファイルは上書きせずスキップ
+    func runExport(scope: ExportScope, includeSidecars: Bool) {
+        guard exportProgress == nil else { return }
+        let sources = exportURLs(for: scope)
+        guard !sources.isEmpty else { return }
+
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "書き出す"
+        panel.message = "書き出し先フォルダを選択"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+
+        exportProgress = ExportProgress(completed: 0, total: sources.count)
+        exportTask = Task.detached(priority: .userInitiated) { [weak self] in
+            var result = ExportResult()
+            for (index, url) in sources.enumerated() {
+                if Task.isCancelled { break }
+                switch Exporter.copyItem(
+                    at: url, into: destination, includeSidecar: includeSidecars)
+                {
+                case .copied: result.copied += 1
+                case .skippedExisting: result.skipped += 1
+                case .failed: result.failed += 1
+                }
+                await self?.updateExportProgress(completed: index + 1)
+            }
+            await self?.finishExport(result, cancelled: Task.isCancelled)
+        }
+    }
+
+    func cancelExport() {
+        exportTask?.cancel()
+    }
+
+    private func updateExportProgress(completed: Int) {
+        exportProgress?.completed = completed
+    }
+
+    private func finishExport(_ result: ExportResult, cancelled: Bool) {
+        exportProgress = nil
+        exportTask = nil
+        isExportSheetPresented = false
+        var parts = ["コピー \(result.copied)件"]
+        if result.skipped > 0 { parts.append("同名スキップ \(result.skipped)件") }
+        if result.failed > 0 { parts.append("失敗 \(result.failed)件") }
+        statusText = (cancelled ? "書き出し中断: " : "書き出し完了: ") + parts.joined(separator: " / ")
+    }
+
+    // MARK: - 除外(✕)のゴミ箱移動
+
+    var rejectedCount: Int {
+        files.count(where: { ratings[$0] == -1 })
+    }
+
+    /// 除外を付けたDNGとそのXMPサイドカーをゴミ箱へ移動する（ゴミ箱から復元可能）。
+    /// 元のDNGへの「書き込み」はしないという不変条件は保ったまま、ファイル単位で移動する
+    func trashRejected() {
+        let rejected = files.filter { ratings[$0] == -1 }
+        guard !rejected.isEmpty else { return }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let fm = FileManager.default
+            var trashed: [URL] = []
+            var failed = 0
+            for url in rejected {
+                do {
+                    try fm.trashItem(at: url, resultingItemURL: nil)
+                    let sidecar = XMPSidecar.url(for: url)
+                    if fm.fileExists(atPath: sidecar.path) {
+                        try? fm.trashItem(at: sidecar, resultingItemURL: nil)
+                    }
+                    trashed.append(url)
+                } catch {
+                    failed += 1
+                }
+            }
+            await self?.removeTrashedFiles(trashed, failed: failed)
+        }
+    }
+
+    private func removeTrashedFiles(_ trashed: [URL], failed: Int) {
+        let removed = Set(trashed)
+        let selected = currentURL
+        files.removeAll { removed.contains($0) }
+        for url in trashed {
+            ratings.removeValue(forKey: url)
+            labels.removeValue(forKey: url)
+            keywords.removeValue(forKey: url)
+        }
+        let visible = visibleFiles
+        if let selected, let index = visible.firstIndex(of: selected) {
+            currentIndex = index
+        } else {
+            currentIndex = min(max(0, currentIndex), max(0, visible.count - 1))
+            if visible.isEmpty {
+                viewMode = .grid
+                currentFrame = nil
+            } else if viewMode == .single {
+                loadCurrent()
+            }
+        }
+        statusText =
+            failed > 0
+            ? "ゴミ箱へ移動: \(trashed.count)件（失敗 \(failed)件）"
+            : "ゴミ箱へ移動: \(trashed.count)件"
     }
 
     /// レンダラから present 完了が通知される。キー押下→表示のレイテンシ確定点。

@@ -24,6 +24,18 @@ struct FApp: App {
                 }
                 .disabled(model.recentFolders.isEmpty)
             }
+            CommandGroup(after: .importExport) {
+                Button("書き出す…") {
+                    model.beginExport()
+                }
+                .keyboardShortcut("e", modifiers: .command)
+                .disabled(model.files.isEmpty)
+
+                Button("除外(✕)をゴミ箱へ移動…") {
+                    model.isConfirmingTrash = true
+                }
+                .disabled(model.rejectedCount == 0)
+            }
             CommandGroup(after: .sidebar) {
                 Toggle(
                     "撮影情報を表示",
@@ -171,6 +183,19 @@ struct ContentView: View {
         .sheet(isPresented: $model.isEditingKeywords) {
             KeywordEditorView(model: model)
         }
+        .sheet(isPresented: $model.isExportSheetPresented) {
+            ExportView(model: model)
+        }
+        .alert("除外(✕)をゴミ箱へ移動", isPresented: $model.isConfirmingTrash) {
+            Button("ゴミ箱へ移動", role: .destructive) {
+                model.trashRejected()
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text(
+                "✕を付けた \(model.rejectedCount) 件のDNGとXMPサイドカーをゴミ箱へ移動します。"
+                    + "ゴミ箱からは元に戻せます。")
+        }
         .onAppear {
             isFocused = true
             model.bootstrap()
@@ -203,6 +228,15 @@ struct ContentView: View {
             }
             ToolbarItem {
                 filterMenu
+            }
+            ToolbarItem {
+                Button {
+                    model.beginExport()
+                } label: {
+                    Label("書き出す", systemImage: "square.and.arrow.up")
+                }
+                .help("選んだ写真を別フォルダへ書き出す (⌘E)")
+                .disabled(model.files.isEmpty)
             }
         }
     }
