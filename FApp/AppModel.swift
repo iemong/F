@@ -68,6 +68,12 @@ final class AppModel {
             UserDefaults.standard.set(Double(gridCellSize), forKey: "gridCellSize")
         }
     }
+    /// 撮影情報パネル（Iキー）の表示状態（UserDefaultsに永続化）
+    var showInfoPanel = false {
+        didSet {
+            UserDefaults.standard.set(showInfoPanel, forKey: "showInfoPanel")
+        }
+    }
     private(set) var currentFolder: URL?
     /// マウント中のSDカード等（NSWorkspaceの通知で更新）
     private(set) var removableVolumes: [RemovableVolume] = []
@@ -206,6 +212,9 @@ final class AppModel {
     /// グリッドのサムネイル供給（LRU 320MB）
     @ObservationIgnored let thumbnails = ThumbnailProvider()
 
+    /// 撮影情報パネルの供給（Iキー、URLキーでキャッシュ）
+    @ObservationIgnored let captureInfoProvider = CaptureInfoProvider()
+
     /// テクスチャキャッシュ（上限2GB、コスト=テクスチャバイト数）。
     /// 通常表示とフル解像（等倍用）を FrameKey で区別して同居させる
     @ObservationIgnored private let cache = LRUByteCache<FrameKey, TextureFrame>(
@@ -258,6 +267,7 @@ final class AppModel {
         loadRecentFolders()
         let savedCellSize = UserDefaults.standard.double(forKey: "gridCellSize")
         if savedCellSize >= 120 { gridCellSize = savedCellSize }
+        showInfoPanel = UserDefaults.standard.bool(forKey: "showInfoPanel")
 
         let arguments = CommandLine.arguments
         isAutotest = arguments.contains("--autotest")

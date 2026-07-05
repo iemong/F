@@ -25,6 +25,14 @@ struct FApp: App {
                 .disabled(model.recentFolders.isEmpty)
             }
             CommandGroup(after: .sidebar) {
+                Toggle(
+                    "撮影情報を表示",
+                    isOn: Binding(
+                        get: { model.showInfoPanel },
+                        set: { model.showInfoPanel = $0 })
+                )
+                .keyboardShortcut("i", modifiers: .command)
+                Divider()
                 Button("サムネイルを拡大") {
                     model.gridCellSize = min(400, model.gridCellSize + 40)
                 }
@@ -73,6 +81,17 @@ struct ContentView: View {
                     statusBar
                     Spacer()
                 }
+            }
+
+            if model.showInfoPanel, let url = model.currentURL {
+                VStack {
+                    HStack {
+                        Spacer()
+                        InfoPanelView(url: url, provider: model.captureInfoProvider)
+                    }
+                    Spacer()
+                }
+                .padding(12)
             }
         }
         .focusable()
@@ -128,6 +147,10 @@ struct ContentView: View {
         }
         .onKeyPress(keys: ["t"]) { _ in
             model.beginKeywordEditing()
+            return .handled
+        }
+        .onKeyPress(keys: ["i"]) { _ in
+            model.showInfoPanel.toggle()
             return .handled
         }
         .sheet(isPresented: $model.isEditingKeywords) {
