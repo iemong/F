@@ -32,6 +32,12 @@ struct FApp: App {
                         set: { model.showInfoPanel = $0 })
                 )
                 .keyboardShortcut("i", modifiers: .command)
+                Toggle(
+                    "フィルムストリップを表示",
+                    isOn: Binding(
+                        get: { model.showFilmstrip },
+                        set: { model.showFilmstrip = $0 })
+                )
                 Divider()
                 Button("サムネイルを拡大") {
                     model.gridCellSize = min(400, model.gridCellSize + 40)
@@ -75,11 +81,16 @@ struct ContentView: View {
                 }
             }
 
-            VStack {
+            VStack(spacing: 0) {
                 Spacer()
                 HStack {
                     statusBar
                     Spacer()
+                }
+                if model.viewMode == .single, model.showFilmstrip,
+                    !model.visibleFiles.isEmpty
+                {
+                    FilmstripView(model: model)
                 }
             }
 
@@ -151,6 +162,10 @@ struct ContentView: View {
         }
         .onKeyPress(keys: ["i"]) { _ in
             model.showInfoPanel.toggle()
+            return .handled
+        }
+        .onKeyPress(keys: ["f"]) { _ in
+            model.showFilmstrip.toggle()
             return .handled
         }
         .sheet(isPresented: $model.isEditingKeywords) {

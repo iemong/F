@@ -74,6 +74,12 @@ final class AppModel {
             UserDefaults.standard.set(showInfoPanel, forKey: "showInfoPanel")
         }
     }
+    /// フィルムストリップ（Fキー）の表示状態（UserDefaultsに永続化、既定は表示）
+    var showFilmstrip = true {
+        didSet {
+            UserDefaults.standard.set(showFilmstrip, forKey: "showFilmstrip")
+        }
+    }
     private(set) var currentFolder: URL?
     /// マウント中のSDカード等（NSWorkspaceの通知で更新）
     private(set) var removableVolumes: [RemovableVolume] = []
@@ -268,6 +274,9 @@ final class AppModel {
         let savedCellSize = UserDefaults.standard.double(forKey: "gridCellSize")
         if savedCellSize >= 120 { gridCellSize = savedCellSize }
         showInfoPanel = UserDefaults.standard.bool(forKey: "showInfoPanel")
+        if UserDefaults.standard.object(forKey: "showFilmstrip") != nil {
+            showFilmstrip = UserDefaults.standard.bool(forKey: "showFilmstrip")
+        }
 
         let arguments = CommandLine.arguments
         isAutotest = arguments.contains("--autotest")
@@ -473,6 +482,13 @@ final class AppModel {
             return
         }
         loadCurrent()
+    }
+
+    /// フィルムストリップ等からの任意位置ジャンプ。
+    /// 隣接位置ならホットミラーの高速経路がそのまま効く
+    func jumpTo(_ index: Int) {
+        guard visibleFiles.indices.contains(index) else { return }
+        navigate(index - currentIndex)
     }
 
     /// グリッド: 上下キーで1行分移動
