@@ -78,6 +78,25 @@ public struct CaptureMetadata: Sendable, Equatable {
     public let dateTimeOriginal: String?
     /// 露出補正（EV）
     public let exposureBiasEV: Double?
+
+    /// DNG以外（JPG等）のメタデータを呼び出し側で組み立てられるように公開する
+    public init(
+        exposureTimeSeconds: Double?,
+        fNumber: Double?,
+        iso: Int?,
+        focalLengthMM: Double?,
+        lensModel: String?,
+        dateTimeOriginal: String?,
+        exposureBiasEV: Double?
+    ) {
+        self.exposureTimeSeconds = exposureTimeSeconds
+        self.fNumber = fNumber
+        self.iso = iso
+        self.focalLengthMM = focalLengthMM
+        self.lensModel = lensModel
+        self.dateTimeOriginal = dateTimeOriginal
+        self.exposureBiasEV = exposureBiasEV
+    }
 }
 
 /// raw 本体（CFA）の所在情報。デコードは DecodeKit の責務
