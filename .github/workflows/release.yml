@@ -1,14 +1,26 @@
 name: Release
 
 # v* タグのpushでDMGをビルドしてGitHub Releaseに添付する。
-# CIでは ad-hoc署名（Developer ID署名・公証はローカルで実施して
-# 同名アセットを差し替える運用も可）
+#
+# GitHub Secrets が設定されていれば Developer ID 署名 + Apple 公証まで自動化し、
+# 未設定なら ad-hoc 署名にフォールバックする（DMGは必ず生成される）。
+#
+# 必要な Secrets（設定方法は RUNBOOK-signing.md）:
+#   DEVELOPER_ID_CERT_P12       … Developer ID Application 証明書(.p12)のbase64
+#   DEVELOPER_ID_CERT_PASSWORD  … 上記 .p12 のエクスポート時パスワード
+#   ASC_KEY_ID                  … App Store Connect APIキーの Key ID
+#   ASC_ISSUER_ID               … 同 Issuer ID
+#   ASC_KEY_P8                  … 同 APIキー(.p8)のbase64
 on:
   push:
     tags: ["v*"]
 
 permissions:
   contents: write
+
+env:
+  TEAM_ID: 6RSL327PX8
+  SIGN_IDENTITY: "Developer ID Application: SHINNOSUKE IRIE (6RSL327PX8)"
 
 jobs:
   release:
@@ -21,17 +33,72 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      - name: 署名・公証の可否を判定
+        id: caps
+        env:
+          CERT_P12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          ASC_KEY: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          if [ -n "$CERT_P12" ]; then
+            echo "sign=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::署名用Secret未設定のためad-hoc署名で配布します"
+          fi
+          if [ -n "$CERT_P12" ] && [ -n "$ASC_KEY" ]; then
+            echo "notarize=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "notarize=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: パッケージテスト
         run: |
           for pkg in DNGKit DecodeKit CacheKit XMPKit; do
             swift test --package-path "Packages/$pkg"
           done
 
-      - name: アプリビルド (Release)
+      - name: アプリビルド (Release, 署名なし)
         run: |
           xcodebuild -project F.xcodeproj -scheme F -configuration Release \
             -derivedDataPath build/DerivedData \
-            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO build
+            CODE_SIGNING_ALLOWED=NO build
+
+      - name: 署名証明書をインポート
+        if: steps.caps.outputs.sign == 'true'
+        env:
+          CERT_P12_BASE64: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PW="$(openssl rand -base64 24)"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          # codesign が非対話で秘密鍵を使えるようACLを開放
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PW" "$KEYCHAIN_PATH" >/dev/null
+          # 検索対象キーチェーンに追加（既存を維持しつつ先頭に）
+          security list-keychains -d user -s "$KEYCHAIN_PATH" \
+            $(security list-keychains -d user | sed 's/"//g')
+          rm -f "$CERT_PATH"
+
+      - name: アプリ署名 (Developer ID + hardened runtime)
+        if: steps.caps.outputs.sign == 'true'
+        run: |
+          APP="build/DerivedData/Build/Products/Release/F.app"
+          codesign --force --deep --options runtime --timestamp \
+            --sign "$SIGN_IDENTITY" "$APP"
+          codesign --verify --strict --deep --verbose=2 "$APP"
+
+      - name: アプリ署名 (ad-hoc フォールバック)
+        if: steps.caps.outputs.sign == 'false'
+        run: |
+          APP="build/DerivedData/Build/Products/Release/F.app"
+          codesign --force --deep --sign - "$APP"
 
       - name: DMG作成
         run: |
@@ -42,6 +109,33 @@ jobs:
           hdiutil create -volname "F ${{ steps.version.outputs.version }}" \
             -srcfolder dmgroot -ov -format UDZO \
             "F-${{ steps.version.outputs.version }}.dmg"
+
+      - name: DMG署名
+        if: steps.caps.outputs.sign == 'true'
+        run: |
+          codesign --force --timestamp --sign "$SIGN_IDENTITY" \
+            "F-${{ steps.version.outputs.version }}.dmg"
+
+      - name: 公証 + staple
+        if: steps.caps.outputs.notarize == 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          KEY_PATH="$RUNNER_TEMP/asc_key.p8"
+          echo "$ASC_KEY_P8_BASE64" | base64 --decode > "$KEY_PATH"
+          DMG="F-${{ steps.version.outputs.version }}.dmg"
+          xcrun notarytool submit "$DMG" \
+            --key "$KEY_PATH" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" \
+            --wait --timeout 30m
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          rm -f "$KEY_PATH"
+
+      - name: 一時キーチェーン削除
+        if: always() && steps.caps.outputs.sign == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
 
       - name: Release作成 + DMG添付
         uses: softprops/action-gh-release@v2
