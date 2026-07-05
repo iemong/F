@@ -15,6 +15,8 @@ public struct DNGFile: Sendable {
     public let asShotNeutral: [Double]?
     /// XYZ(D65)→カメラRGB の 3×3 行列（行優先9要素）
     public let colorMatrix2: [Double]?
+    /// 撮影時の主要Exif（存在しないタグは nil）
+    public let capture: CaptureMetadata
 
     private let fileData: Data
     private let sourceURL: URL?
@@ -65,9 +67,13 @@ public struct DNGFile: Sendable {
             }
         }
 
+        var exifIFD: IFD?
         if let exifEntry = ifd0[TIFFTag.exifIFD],
-            let exifOffset = try exifEntry.uint(reader),
-            let exifIFD = try? IFD.parse(reader, at: Int(exifOffset)),
+            let exifOffset = try exifEntry.uint(reader)
+        {
+            exifIFD = try? IFD.parse(reader, at: Int(exifOffset))
+        }
+        if let exifIFD,
             let makerNote = exifIFD[TIFFTag.makerNote],
             let p = Self.leicaMakerNotePreview(entry: makerNote, reader: reader)
         {
@@ -102,7 +108,32 @@ public struct DNGFile: Sendable {
         let matrix = try ifd0[TIFFTag.colorMatrix2]?.doubles(reader)
         self.colorMatrix2 = matrix?.count == 9 ? matrix : nil
 
+        self.capture = Self.captureMetadata(exif: exifIFD, ifd0: ifd0, reader: reader)
         self.fileData = data
+    }
+
+    /// 撮影時Exifの抽出。表示用の付随情報なので、個々のタグの読み取り失敗は nil に落とす。
+    /// M262 は DateTimeOriginal を ExifIFD ではなく IFD0 に書くため両方を見る（ExifIFD優先）
+    private static func captureMetadata(
+        exif: IFD?, ifd0: IFD, reader: ByteReader
+    ) -> CaptureMetadata {
+        func entry(_ tag: UInt16) -> IFDEntry? { exif?[tag] ?? ifd0[tag] }
+        func doubleValue(_ tag: UInt16) -> Double? {
+            entry(tag).flatMap { (try? $0.double(reader)) ?? nil }
+        }
+        func stringValue(_ tag: UInt16) -> String? {
+            entry(tag).flatMap { (try? $0.string(reader)) ?? nil }
+        }
+        return CaptureMetadata(
+            exposureTimeSeconds: doubleValue(TIFFTag.exposureTime),
+            fNumber: doubleValue(TIFFTag.fNumber),
+            iso: entry(TIFFTag.isoSpeed)
+                .flatMap { (try? $0.uint(reader)) ?? nil }
+                .map(Int.init),
+            focalLengthMM: doubleValue(TIFFTag.focalLength),
+            lensModel: stringValue(TIFFTag.lensModel),
+            dateTimeOriginal: stringValue(TIFFTag.dateTimeOriginal),
+            exposureBiasEV: doubleValue(TIFFTag.exposureBias))
     }
 
     // MARK: - 抽出

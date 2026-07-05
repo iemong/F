@@ -89,4 +89,15 @@ struct Q3Tests {
             file.bestPreview(fitting: PixelSize(width: 2560, height: 1440))?.pixelSize
                 == PixelSize(width: 5288, height: 3518))
     }
+
+    @Test func 撮影メタデータ() throws {
+        let c = file.capture
+        #expect(abs(try #require(c.exposureTimeSeconds) - 1.0 / 50) < 1e-9)
+        #expect(abs(try #require(c.fNumber) - 1.7) < 1e-9)
+        #expect(c.iso == 200)
+        #expect(abs(try #require(c.focalLengthMM) - 28.0) < 1e-9)
+        #expect(c.lensModel == "SUMMILUX 1:1.7/28 ASPH.")
+        #expect(c.dateTimeOriginal == "2026:06:28 11:54:46")
+        #expect(c.exposureBiasEV == 0)
+    }
 }

@@ -16,8 +16,15 @@ enum TIFFTag {
     static let jpegInterchangeFormatLength: UInt16 = 0x0202
     static let cfaRepeatPatternDim: UInt16 = 0x828D
     static let cfaPattern: UInt16 = 0x828E
+    static let exposureTime: UInt16 = 0x829A
+    static let fNumber: UInt16 = 0x829D
     static let exifIFD: UInt16 = 0x8769
+    static let isoSpeed: UInt16 = 0x8827
+    static let dateTimeOriginal: UInt16 = 0x9003
+    static let exposureBias: UInt16 = 0x9204
+    static let focalLength: UInt16 = 0x920A
     static let makerNote: UInt16 = 0x927C
+    static let lensModel: UInt16 = 0xA434
     static let colorMatrix2: UInt16 = 0xC622
     static let asShotNeutral: UInt16 = 0xC628
     static let blackLevel: UInt16 = 0xC61A

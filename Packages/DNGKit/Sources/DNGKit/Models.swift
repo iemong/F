@@ -63,6 +63,23 @@ public struct PreviewDescriptor: Sendable, Equatable {
     public let byteRange: Range<Int>
 }
 
+/// 撮影時の主要Exif（セレクト時の情報表示用）。値はファイルに書かれたままで、
+/// M262 の "not selected"（非コードレンズ）等の表示上の解釈は呼び出し側の責務
+public struct CaptureMetadata: Sendable, Equatable {
+    /// 露光時間（秒）
+    public let exposureTimeSeconds: Double?
+    /// F値。Mボディ（レンジファインダー）は絞りを検知できないため nil
+    public let fNumber: Double?
+    public let iso: Int?
+    /// 焦点距離（mm）。M262 の非コードレンズは 0
+    public let focalLengthMM: Double?
+    public let lensModel: String?
+    /// Exif 生文字列 "yyyy:MM:dd HH:mm:ss"
+    public let dateTimeOriginal: String?
+    /// 露出補正（EV）
+    public let exposureBiasEV: Double?
+}
+
 /// raw 本体（CFA）の所在情報。デコードは DecodeKit の責務
 public struct RawInfo: Sendable, Equatable {
     public let pixelSize: PixelSize

@@ -70,6 +70,18 @@ struct M262Tests {
         #expect(p.byteRange == 4_096 ..< (4_096 + 9_921))
     }
 
+    @Test func 撮影メタデータ_DateTimeOriginalはIFD0側() throws {
+        let c = file.capture
+        #expect(abs(try #require(c.exposureTimeSeconds) - 1.0 / 500) < 1e-9)
+        #expect(c.fNumber == nil) // Mボディはレンズの絞り値を知らない
+        #expect(c.iso == 400)
+        #expect(c.focalLengthMM == 0) // 非コード（未選択）レンズ
+        #expect(c.lensModel == "not selected") // 解釈せずファイルの値のまま返す
+        // M262 は DateTimeOriginal を ExifIFD ではなく IFD0 に書く
+        #expect(c.dateTimeOriginal == "2026:06:17 05:34:33")
+        #expect(c.exposureBiasEV == 0)
+    }
+
     @Test func 十分な解像度がなければ最大プレビューにフォールバック() {
         // 800×600 を満たす最小 = MakerNotes 1472×976
         #expect(
