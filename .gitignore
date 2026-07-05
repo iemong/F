@@ -14,3 +14,9 @@ xcuserdata/
 
 # XcodeBuildMCP ローカル設定
 .xcodebuildmcp/
+
+# 署名用の秘密鍵・証明書（絶対にコミットしない）
+*.p12
+*.p8
+*.cer
+*.certSigningRequest
