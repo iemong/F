@@ -73,3 +73,40 @@ Release の `F-0.0.2.dmg` はダブルクリックで警告なく起動する。
   Developer ID 署名 → DMG 署名 → notarytool 提出 → stapler
 - Secrets が無ければ ad-hoc 署名にフォールバック（DMGは出るがGatekeeperで要右クリック）
 - `ASC_KEY_P8` だけ無い場合は署名のみ（公証はスキップ）
+
+## Sparkle 自動更新（v0.3.0〜）
+
+アプリ内更新は Sparkle 2。フィードは各 Release に添付される `appcast.xml` で、
+アプリは `https://github.com/iemong/F/releases/latest/download/appcast.xml` を見る
+（＝最新 Release の appcast が常に配信される）。
+
+### 鍵の管理
+
+- **EdDSA 秘密鍵**（更新パッケージの署名用）:
+  - ローカルの **ログインKeychain**（項目名 "Private key for signing Sparkle updates"、
+    2026-07-06 に generate_keys で作成）
+  - GitHub Secrets の `SPARKLE_ED_PRIVATE_KEY`（CI の sign_update 用）
+- **公開鍵**: `Support/Info.plist` の `SUPublicEDKey`
+  （`cjL4gbHH/3Xsrs1gfsOypkEInpzJP9AMI4v6PJewnBs=`）
+
+秘密鍵を紛失すると既存インストールへ更新を配信できなくなる（公開鍵の差し替えは
+新しい鍵で署名した更新を受け取れないため）。Keychain のバックアップを推奨。
+
+再セットアップ手順（鍵が残っている場合）:
+
+```bash
+# Sparkle配布物の bin/generate_keys を使用
+./bin/generate_keys -x /tmp/ed_key      # Keychainから書き出し
+gh secret set SPARKLE_ED_PRIVATE_KEY < /tmp/ed_key
+rm /tmp/ed_key
+```
+
+### 仕組み（release.yml 追記分）
+
+- アプリ署名は Sparkle.framework の入れ子（XPCServices / Autoupdate / Updater.app）を
+  明示的に署名してから外側を署名する。`--deep` は Downloader.xpc の
+  sandbox entitlements を剥がすため禁止
+- staple 後の最終 DMG に `sign_update` で EdDSA 署名 → `appcast.xml` を生成して
+  Release アセットに添付
+- `CFBundleVersion` は `$(MARKETING_VERSION)` 連動（Sparkle のバージョン比較に使われる。
+  固定値に戻すと更新判定が壊れるので注意）

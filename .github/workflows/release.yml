@@ -90,7 +90,24 @@ jobs:
         if: steps.caps.outputs.sign == 'true'
         run: |
           APP="build/DerivedData/Build/Products/Release/F.app"
-          codesign --force --deep --options runtime --timestamp \
+          # Sparkle.framework の入れ子から先に明示的に署名する。
+          # --deep は Downloader.xpc の sandbox entitlements を剥がして
+          # 更新のダウンロードを壊すため使わない（Sparkle公式の推奨手順）
+          SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+          if [ -d "$SPARKLE" ]; then
+            codesign --force --options runtime --timestamp \
+              --preserve-metadata=entitlements \
+              --sign "$SIGN_IDENTITY" "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
+            codesign --force --options runtime --timestamp \
+              --sign "$SIGN_IDENTITY" "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
+            codesign --force --options runtime --timestamp \
+              --sign "$SIGN_IDENTITY" "$SPARKLE/Versions/B/Autoupdate"
+            codesign --force --options runtime --timestamp \
+              --sign "$SIGN_IDENTITY" "$SPARKLE/Versions/B/Updater.app"
+            codesign --force --options runtime --timestamp \
+              --sign "$SIGN_IDENTITY" "$SPARKLE"
+          fi
+          codesign --force --options runtime --timestamp \
             --sign "$SIGN_IDENTITY" "$APP"
           codesign --verify --strict --deep --verbose=2 "$APP"
 
@@ -137,8 +154,56 @@ jobs:
         if: always() && steps.caps.outputs.sign == 'true'
         run: security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
 
+      # Sparkle 自動更新用のフィード。アプリは
+      # releases/latest/download/appcast.xml を見るため、毎リリースに添付する。
+      # 署名(EdDSA)は staple 後の最終DMGに対して行う必要がある
+      - name: Sparkle appcast 生成
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
+            echo "::warning::SPARKLE_ED_PRIVATE_KEY 未設定のため appcast をスキップ（アプリ内更新は配信されない）"
+            exit 0
+          fi
+          VERSION="${{ steps.version.outputs.version }}"
+          DMG="F-$VERSION.dmg"
+          SPARKLE_VERSION="2.9.4"
+          curl -sL -o sparkle.tar.xz \
+            "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz"
+          mkdir -p sparkle-dist && tar -xf sparkle.tar.xz -C sparkle-dist bin/sign_update
+          KEY_FILE="$RUNNER_TEMP/sparkle_ed_key"
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$KEY_FILE"
+          SIGNATURE_ATTRS=$(./sparkle-dist/bin/sign_update --ed-key-file "$KEY_FILE" "$DMG")
+          rm -f "$KEY_FILE"
+          PUB_DATE=$(date -u +"%a, %d %b %Y %H:%M:%S +0000")
+          cat > appcast.xml <<APPCAST
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>F</title>
+              <item>
+                <title>$VERSION</title>
+                <pubDate>$PUB_DATE</pubDate>
+                <sparkle:version>$VERSION</sparkle:version>
+                <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+                <sparkle:releaseNotesLink>https://github.com/iemong/F/releases/tag/v$VERSION</sparkle:releaseNotesLink>
+                <enclosure
+                  url="https://github.com/iemong/F/releases/download/v$VERSION/F-$VERSION.dmg"
+                  $SIGNATURE_ATTRS
+                  type="application/octet-stream"/>
+              </item>
+            </channel>
+          </rss>
+          APPCAST
+          # ヒアドキュメントのインデントを除去
+          sed -i '' 's/^          //' appcast.xml
+          cat appcast.xml
+
       - name: Release作成 + DMG添付
         uses: softprops/action-gh-release@v2
         with:
-          files: F-*.dmg
+          files: |
+            F-*.dmg
+            appcast.xml
           generate_release_notes: true
