@@ -1,14 +1,25 @@
+import Sparkle
 import SwiftUI
 
 @main
 struct FApp: App {
     @State private var model = AppModel()
 
+    /// Sparkle 自動更新。フィード/公開鍵は Support/Info.plist（SUFeedURL / SUPublicEDKey）。
+    /// startingUpdater: true で起動時からバックグラウンドの定期チェックが走る
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+
     var body: some Scene {
         WindowGroup {
             ContentView(model: model)
         }
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("アップデートを確認…") {
+                    updaterController.checkForUpdates(nil)
+                }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("フォルダを開く…") {
                     model.openFolder()
