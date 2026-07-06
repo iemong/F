@@ -173,6 +173,7 @@ jobs:
       - name: Sparkle appcast 生成
         env:
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
             echo "::warning::SPARKLE_ED_PRIVATE_KEY 未設定のため appcast をスキップ（アプリ内更新は配信されない）"
@@ -189,6 +190,22 @@ jobs:
           SIGNATURE_ATTRS=$(./sparkle-dist/bin/sign_update --ed-key-file "$KEY_FILE" "$DMG")
           rm -f "$KEY_FILE"
           PUB_DATE=$(date -u +"%a, %d %b %Y %H:%M:%S +0000")
+          # 更新ダイアログに出す変更点の箇条書き。直前リリースからのコミットタイトルを
+          # 使い、ユーザーに関係ない chore/ci/test は除外、conventional prefix は剥がす
+          # （GitHubページを releaseNotesLink で埋め込むと全チュームが表示されて不格好なため、
+          #   description に最小HTMLを埋め込む）
+          PREV_TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" -q .tag_name 2>/dev/null || true)
+          BULLETS=""
+          if [ -n "$PREV_TAG" ]; then
+            BULLETS=$(gh api "repos/$GITHUB_REPOSITORY/compare/$PREV_TAG...v$VERSION" \
+              -q '.commits[].commit.message | split("\n")[0]' \
+              | grep -vE '^(chore|ci|test)(\(.*\))?:' \
+              | sed -E 's/^(feat|fix|docs|refactor|perf|style|build)(\(.*\))?: *//' || true)
+          fi
+          [ -z "$BULLETS" ] && BULLETS="細かな改善と修正"
+          LIS=$(printf '%s\n' "$BULLETS" \
+            | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+                  -e 's|^|          <li>|' -e 's|$|</li>|')
           cat > appcast.xml <<APPCAST
           <?xml version="1.0" encoding="utf-8"?>
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
@@ -200,7 +217,17 @@ jobs:
                 <sparkle:version>$VERSION</sparkle:version>
                 <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
                 <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-                <sparkle:releaseNotesLink>https://github.com/iemong/F/releases/tag/v$VERSION</sparkle:releaseNotesLink>
+                <description><![CDATA[
+                  <style>
+                    body { font-family: -apple-system, sans-serif; font-size: 13px; margin: 12px 16px; }
+                    ul { padding-left: 1.2em; margin: 0; }
+                    li { margin: 4px 0; }
+                    @media (prefers-color-scheme: dark) { body { color: #ddd; } }
+                  </style>
+                  <ul>
+          $LIS
+                  </ul>
+                ]]></description>
                 <enclosure
                   url="https://github.com/iemong/F/releases/download/v$VERSION/F-$VERSION.dmg"
                   $SIGNATURE_ATTRS
