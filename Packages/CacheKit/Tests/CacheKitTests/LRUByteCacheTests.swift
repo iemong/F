@@ -39,6 +39,22 @@ struct LRUByteCacheTests {
         #expect(stats.totalBytes == 100)
     }
 
+    @Test func peekはロードも統計更新もしない() async throws {
+        let cache = LRUByteCache<String, Int>(byteLimit: 1000) { _ in 100 }
+
+        // 未キャッシュ: nil、ミスにもカウントされない
+        #expect(await cache.peek("a") == nil)
+        #expect(await cache.currentStats().misses == 0)
+
+        _ = try await cache.value(for: "a") { 1 }
+
+        // キャッシュ済み: 値が返るがヒット数は増えない
+        #expect(await cache.peek("a") == 1)
+        let stats = await cache.currentStats()
+        #expect(stats.hits == 0)
+        #expect(stats.misses == 1)
+    }
+
     @Test func バイト上限でLRU追い出し() async throws {
         let cache = LRUByteCache<String, Int>(byteLimit: 300) { _ in 100 }
         _ = try await cache.value(for: "a") { 1 }

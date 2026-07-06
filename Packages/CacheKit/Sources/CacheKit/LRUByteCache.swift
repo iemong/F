@@ -37,6 +37,13 @@ public actor LRUByteCache<Key: Hashable & Sendable, Value: Sendable> {
         stats
     }
 
+    /// 値が既にあればそのまま返す（ローダー起動・統計・LRU使用時刻の更新は一切しない）。
+    /// インフライトのロードは「まだ無い」扱いで nil。
+    /// ミス時だけ速報表示を出す、といった分岐の判定に使う
+    public func peek(_ key: Key) -> Value? {
+        entries[key]?.value
+    }
+
     /// キャッシュから取得。なければローダーで取得してキャッシュする
     public func value(
         for key: Key,
