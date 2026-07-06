@@ -311,6 +311,8 @@ final class AppModel {
         renderView = view
     }
 
+    /// 直近のキー送り方向（+1/-1）。先読み窓をこの向きに寄せる
+    @ObservationIgnored private var lastNavigationDirection = 1
     @ObservationIgnored private var generation = 0
     /// 速報（埋め込みプレビュー）を表示した世代。本デコード完了時の差し替え判定に使う
     @ObservationIgnored private var provisionalGeneration = -1
@@ -538,6 +540,7 @@ final class AppModel {
         guard !visible.isEmpty else { return }
         let newIndex = min(max(currentIndex + delta, 0), visible.count - 1)
         guard newIndex != currentIndex else { return }
+        lastNavigationDirection = newIndex > currentIndex ? 1 : -1
         currentIndex = newIndex
 
         // グリッド中は選択移動のみ（重いロードはしない）
@@ -977,13 +980,17 @@ final class AppModel {
         }
     }
 
-    /// 前方2枚・後方1枚を先読みし、対象外のプリフェッチはキャンセルする。
-    /// 完了したフレームは MainActor 側のホットミラーにも載せる
+    /// 進行方向の前方4枚・後方1枚を先読みし、対象外のプリフェッチはキャンセルする。
+    /// 完了したフレームは MainActor 側のホットミラーにも載せる。
+    /// M262はデコード250ms/枚だが画像間の並列は効くため、窓を広げてCPUを遊ばせない
+    /// （ダウンサンプル後のテクスチャは1枚24〜32MBなのでメモリ影響は小さい）
     private func schedulePrefetch() async {
         let visible = visibleFiles
         guard !visible.isEmpty else { return }
-        // 前方優先の順序で並べる
-        let candidates = [currentIndex + 1, currentIndex - 1, currentIndex + 2]
+        // 進行方向優先の順序で並べる（直近1枚 → 逆隣 → その先）
+        let dir = lastNavigationDirection
+        let candidates = [dir, -dir, 2 * dir, 3 * dir, 4 * dir]
+            .map { currentIndex + $0 }
             .filter { visible.indices.contains($0) }
         let keep = Set(candidates.map { FrameKey(url: visible[$0], full: false) })
         await cache.cancelPrefetches(keeping: keep)
@@ -1009,10 +1016,10 @@ final class AppModel {
         trimHotFrames()
     }
 
-    /// ホットミラーは現在位置 ±2 の窓だけ保持する（実体はLRUキャッシュと共有）
+    /// ホットミラーは現在位置 ±4 の窓（先読み窓と同幅）だけ保持する（実体はLRUキャッシュと共有）
     private func trimHotFrames() {
         let visible = visibleFiles
-        let window = (currentIndex - 2) ... (currentIndex + 2)
+        let window = (currentIndex - 4) ... (currentIndex + 4)
         let allowed = Set(window.compactMap { visible.indices.contains($0) ? visible[$0] : nil })
         hotFrames = hotFrames.filter { allowed.contains($0.key) }
     }
