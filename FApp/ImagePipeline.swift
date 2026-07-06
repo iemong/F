@@ -117,6 +117,42 @@ enum ImagePipeline {
             sceneHeight: image.height)
     }
 
+    /// キャッシュミス時の速報表示用: 小さめの埋め込みプレビューを最速でデコードする
+    /// （Q3: 1620×1080 / M262: 1472×976、数〜十数ms）。本デコード完了時に差し替える前提。
+    /// シーン寸法は loadDisplayFrame と同じ座標系に合わせ、差し替えで表示位置が飛ばないようにする
+    static func loadProvisionalFrame(from url: URL) throws -> DisplayFrame {
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        let file = try DNGFile(contentsOf: url)
+        guard
+            // 高さ側は3:2/4:3の縦横比を考慮して低めに（Q3中間1620×1080が候補に入るように）
+            let preview = file.bestPreview(fitting: PixelSize(width: 1280, height: 720)),
+            // fullsize（Q3のJpgFromRaw）しか無い場合は本デコードと同じ仕事になるので速報は出さない
+            preview.kind != .fullsize,
+            let decoded = decodeJPEGToRGBA(file.previewData(preview))
+        else { throw ImagePipelineError.undecodable("速報用プレビューなし") }
+
+        // 本デコードのシーン寸法: Q3=JpgFromRaw寸法 / M262=raw寸法
+        let scene: PixelSize =
+            if let largest = file.largestPreview, largest.kind == .fullsize {
+                largest.pixelSize
+            } else {
+                file.raw?.pixelSize
+                    ?? PixelSize(width: decoded.width, height: decoded.height)
+            }
+        return DisplayFrame(
+            pixelWidth: decoded.width,
+            pixelHeight: decoded.height,
+            rgba: decoded.pixels,
+            orientation: file.orientation,
+            fileName: url.lastPathComponent,
+            decodeDuration: clock.now - start,
+            isFullResolution: false,
+            sceneWidth: scene.width,
+            sceneHeight: scene.height)
+    }
+
     /// 単体のJPGファイル。JPGはそれ自体が最終画像なので常にフル解像扱い。
     /// Orientation はExifから読み、DNGと同じくテクスチャには焼かずUV割当で正立させる
     private static func loadJPEGFile(

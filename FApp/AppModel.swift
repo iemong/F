@@ -312,6 +312,10 @@ final class AppModel {
     }
 
     @ObservationIgnored private var generation = 0
+    /// 速報（埋め込みプレビュー）を表示した世代。本デコード完了時の差し替え判定に使う
+    @ObservationIgnored private var provisionalGeneration = -1
+    /// 本フレームを表示済みの世代。遅れて届いた速報が本フレームを上書きしないためのガード
+    @ObservationIgnored private var realFrameGeneration = -1
     @ObservationIgnored private var navigationStart: ContinuousClock.Instant?
     /// presentedTime との差分計算用（CACurrentMediaTime 基準）
     @ObservationIgnored private var navigationStartMedia: CFTimeInterval = 0
@@ -356,6 +360,11 @@ final class AppModel {
 
         let arguments = CommandLine.arguments
         isAutotest = arguments.contains("--autotest")
+        if isAutotest {
+            // パイプ先でも進捗が流れるように行バッファへ（既定はフルバッファで
+            // ハング時に停止地点が見えない）
+            setlinebuf(stdout)
+        }
         if let flagIndex = arguments.firstIndex(of: "--folder"),
             arguments.indices.contains(flagIndex + 1)
         {
@@ -896,6 +905,30 @@ final class AppModel {
             self.finishLoad(result, requested: requested)
             await self.schedulePrefetch()
         }
+
+        // キャッシュミスなら埋め込みプレビューを速報表示（本デコード完了時に差し替え）。
+        // JPGは埋め込みプレビューが極小サムネしかないため対象外
+        guard !url.isJPEGFile else { return }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard await cache.peek(FrameKey(url: url, full: false)) == nil,
+                let cpu = try? ImagePipeline.loadProvisionalFrame(from: url),
+                let frame = try? TextureFactory.makeFrame(from: cpu)
+            else { return }
+            await self?.presentProvisional(frame, requested: requested)
+        }
+    }
+
+    /// ミス時の速報表示。本フレームが先に届いていたら何もしない。
+    /// present は本フレームと同じ世代で行い、計測（frameDidPresent）は
+    /// 「最初に何かが見えるまで」の時間を指すことになる
+    private func presentProvisional(_ frame: TextureFrame, requested: Int) {
+        guard requested == generation, realFrameGeneration != requested else { return }
+        provisionalGeneration = requested
+        lastDecodeDuration = frame.decodeDuration
+        let presented = PresentedFrame(generation: requested, frame: frame)
+        currentFrame = presented
+        renderView?.show(presented)
+        lastWorkMS = (CACurrentMediaTime() - navigationStartMedia) * 1000
     }
 
     private func finishLoad(_ result: Result<TextureFrame, any Error>, requested: Int) {
@@ -903,8 +936,18 @@ final class AppModel {
         guard requested == generation else { return }
         switch result {
         case .success(let frame):
+            realFrameGeneration = requested
             lastDecodeDuration = frame.decodeDuration
-            let presented = PresentedFrame(generation: requested, frame: frame)
+            // 速報を出した後の差し替えは世代を進める
+            // （MetalLayerView は同一世代の show をスキップするため）
+            let presentGeneration: Int
+            if provisionalGeneration == requested {
+                generation += 1
+                presentGeneration = generation
+            } else {
+                presentGeneration = requested
+            }
+            let presented = PresentedFrame(generation: presentGeneration, frame: frame)
             currentFrame = presented
             statusText = ""
             renderView?.show(presented)
