@@ -578,6 +578,18 @@ final class AppModel {
         navigate(index - currentIndex)
     }
 
+    /// 表示用デコードの目標長辺（px）。最大解像度スクリーンの長辺基準で、
+    /// これを超える全画素デコードはfit表示に寄与しない（等倍はfull経路が担う）。
+    /// FrameKey にはターゲットを含めないため、スクリーン構成の変更直後は
+    /// 旧ターゲットのキャッシュが残り得るが、LRUで自然に入れ替わる
+    private var displayTargetPixels: Int {
+        let side =
+            NSScreen.screens
+            .map { max($0.frame.width, $0.frame.height) * $0.backingScaleFactor }
+            .max() ?? 2560
+        return Int(side)
+    }
+
     /// グリッド: 上下キーで1行分移動
     func moveSelectionVertically(_ rows: Int) {
         guard viewMode == .grid, !visibleFiles.isEmpty else { return }
@@ -889,12 +901,14 @@ final class AppModel {
         navigateState = signposter.beginInterval("navigate")
 
         let cache = cache
+        let target = displayTargetPixels
         Task { [weak self] in
             let result: Result<TextureFrame, any Error>
             do {
                 let frame = try await cache.value(for: FrameKey(url: url, full: false)) {
                     try Task.checkCancellation()
-                    let cpu = try ImagePipeline.loadDisplayFrame(from: url)
+                    let cpu = try ImagePipeline.loadDisplayFrame(
+                        from: url, displayTarget: target)
                     return try TextureFactory.makeFrame(from: cpu)
                 }
                 result = .success(frame)
@@ -974,11 +988,12 @@ final class AppModel {
         let keep = Set(candidates.map { FrameKey(url: visible[$0], full: false) })
         await cache.cancelPrefetches(keeping: keep)
         trimHotFrames()
+        let target = displayTargetPixels
         for index in candidates {
             let url = visible[index]
             let task = await cache.prefetch(key: FrameKey(url: url, full: false)) {
                 try Task.checkCancellation()
-                let cpu = try ImagePipeline.loadDisplayFrame(from: url)
+                let cpu = try ImagePipeline.loadDisplayFrame(from: url, displayTarget: target)
                 return try TextureFactory.makeFrame(from: cpu)
             }
             Task { [weak self] in
