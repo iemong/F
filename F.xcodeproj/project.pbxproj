@@ -11,6 +11,7 @@
 		A11CE00000000000000000B2 /* DecodeKit in Frameworks */ = {isa = PBXBuildFile; productRef = A11CE00000000000000000D2 /* DecodeKit */; };
 		A11CE00000000000000000B3 /* CacheKit in Frameworks */ = {isa = PBXBuildFile; productRef = A11CE00000000000000000D3 /* CacheKit */; };
 		A11CE00000000000000000B4 /* XMPKit in Frameworks */ = {isa = PBXBuildFile; productRef = A11CE00000000000000000D4 /* XMPKit */; };
+		A11CE00000000000000000B6 /* AppCore in Frameworks */ = {isa = PBXBuildFile; productRef = A11CE00000000000000000D6 /* AppCore */; };
 			A11CE00000000000000000B5 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A11CE00000000000000000D5 /* Sparkle */; };
 /* End PBXBuildFile section */
 
@@ -35,6 +36,7 @@
 				A11CE00000000000000000B2 /* DecodeKit in Frameworks */,
 				A11CE00000000000000000B3 /* CacheKit in Frameworks */,
 				A11CE00000000000000000B4 /* XMPKit in Frameworks */,
+				A11CE00000000000000000B6 /* AppCore in Frameworks */,
 					A11CE00000000000000000B5 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -82,6 +84,7 @@
 				A11CE00000000000000000D2 /* DecodeKit */,
 				A11CE00000000000000000D3 /* CacheKit */,
 				A11CE00000000000000000D4 /* XMPKit */,
+				A11CE00000000000000000D6 /* AppCore */,
 					A11CE00000000000000000D5 /* Sparkle */,
 			);
 			productName = F;
@@ -117,6 +120,7 @@
 				A11CE00000000000000000C2 /* XCLocalSwiftPackageReference "Packages/DecodeKit" */,
 				A11CE00000000000000000C3 /* XCLocalSwiftPackageReference "Packages/CacheKit" */,
 				A11CE00000000000000000C4 /* XCLocalSwiftPackageReference "Packages/XMPKit" */,
+				A11CE00000000000000000C6 /* XCLocalSwiftPackageReference "Packages/AppCore" */,
 				A11CE00000000000000000C5 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -294,6 +298,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/XMPKit;
 		};
+		A11CE00000000000000000C6 /* XCLocalSwiftPackageReference "Packages/AppCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/AppCore;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -323,6 +331,10 @@
 		A11CE00000000000000000D4 /* XMPKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = XMPKit;
+		};
+		A11CE00000000000000000D6 /* AppCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AppCore;
 		};
 		A11CE00000000000000000D5 /* Sparkle */ = {
 			isa = XCSwiftPackageProductDependency;

@@ -1,3 +1,4 @@
+import AppCore
 import SwiftUI
 
 /// ⌘E で開くエクスポートシート。対象（表示中/レート/ラベル/キーワード）を選び、
@@ -14,6 +15,7 @@ struct ExportView: View {
     @State private var selectedLabel = "Red"
     @State private var selectedKeyword = ""
     @State private var includeSidecars = true
+    @State private var verifyChecksum = false
 
     private var scope: ExportScope {
         switch choice {
@@ -103,6 +105,7 @@ struct ExportView: View {
             }
 
             Toggle("XMPサイドカーも一緒にコピー（レート/ラベル/キーワードを引き継ぐ）", isOn: $includeSidecars)
+            Toggle("コピー後にSHA-256で検証（低速）", isOn: $verifyChecksum)
 
             Text("対象: \(targetCount)件（同名ファイルは上書きせずスキップ）")
                 .font(.system(size: 12))
@@ -113,7 +116,10 @@ struct ExportView: View {
                 Button("キャンセル") { model.isExportSheetPresented = false }
                     .keyboardShortcut(.cancelAction)
                 Button("書き出し先を選んで開始…") {
-                    model.runExport(scope: scope, includeSidecars: includeSidecars)
+                    model.runExport(
+                        scope: scope,
+                        includeSidecars: includeSidecars,
+                        verifyChecksum: verifyChecksum)
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(targetCount == 0)

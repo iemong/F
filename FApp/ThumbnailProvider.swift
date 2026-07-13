@@ -1,3 +1,4 @@
+import AppCore
 import CacheKit
 import CoreGraphics
 import DNGKit

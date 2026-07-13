@@ -1,3 +1,4 @@
+import AppCore
 import Sparkle
 import SwiftUI
 

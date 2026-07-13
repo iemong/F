@@ -282,3 +282,88 @@ struct SidecarFileTests {
         #expect(try String(contentsOf: sidecar, encoding: .utf8) == garbage)
     }
 }
+
+@Suite("XMP書き込みの直列化")
+struct XMPWriteCoordinatorTests {
+    private func makeImageURL() throws -> (directory: URL, image: URL) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("XMPWriteCoordinator-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        return (directory, directory.appendingPathComponent("L1000100.DNG"))
+    }
+
+    @Test func 古いレート更新は新しい値を上書きしない() async throws {
+        let fixture = try makeImageURL()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let writer = XMPWriteCoordinator()
+
+        #expect(
+            try await writer.writeRating(5, forImageAt: fixture.image, revision: 2))
+        #expect(
+            try await !writer.writeRating(1, forImageAt: fixture.image, revision: 1))
+        #expect(XMPSidecar.readRating(forImageAt: fixture.image) == 5)
+    }
+
+    @Test func 異なる項目の更新は到着順に関係なく共存する() async throws {
+        let fixture = try makeImageURL()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let writer = XMPWriteCoordinator()
+
+        try await writer.writeKeywords(["旅行", "夜"], forImageAt: fixture.image, revision: 3)
+        try await writer.writeRating(4, forImageAt: fixture.image, revision: 1)
+        try await writer.writeLabel("Blue", forImageAt: fixture.image, revision: 2)
+
+        #expect(XMPSidecar.readRating(forImageAt: fixture.image) == 4)
+        #expect(XMPSidecar.readLabel(forImageAt: fixture.image) == "Blue")
+        #expect(XMPSidecar.readKeywords(forImageAt: fixture.image) == ["旅行", "夜"])
+    }
+
+    @Test func 同時更新でも最大リビジョンが残る() async throws {
+        let fixture = try makeImageURL()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let writer = XMPWriteCoordinator()
+
+        await withTaskGroup(of: Void.self) { group in
+            for revision in 1 ... 40 {
+                group.addTask {
+                    _ = try? await writer.writeRating(
+                        revision, forImageAt: fixture.image, revision: UInt64(revision))
+                }
+            }
+        }
+
+        #expect(XMPSidecar.readRating(forImageAt: fixture.image) == 40)
+    }
+
+    @Test func DNGとJPGは同じサイドカーの順序を共有する() async throws {
+        let fixture = try makeImageURL()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let jpg = fixture.image.deletingPathExtension().appendingPathExtension("JPG")
+        let writer = XMPWriteCoordinator()
+
+        try await writer.writeRating(5, forImageAt: jpg, revision: 2)
+        let applied = try await writer.writeRating(1, forImageAt: fixture.image, revision: 1)
+
+        #expect(!applied)
+        #expect(XMPSidecar.readRating(forImageAt: fixture.image) == 5)
+    }
+
+    @Test func 未作成サイドカーのクリアも古い更新を無効化する() async throws {
+        let fixture = try makeImageURL()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let writer = XMPWriteCoordinator()
+
+        let cleared = try await writer.writeRating(
+            0,
+            forImageAt: fixture.image,
+            revision: 2,
+            createSidecarIfMissing: false)
+        let stale = try await writer.writeRating(
+            5, forImageAt: fixture.image, revision: 1)
+
+        #expect(cleared)
+        #expect(!stale)
+        #expect(!FileManager.default.fileExists(atPath: XMPSidecar.url(for: fixture.image).path))
+    }
+}

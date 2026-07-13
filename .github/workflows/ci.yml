@@ -12,12 +12,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 秘密鍵・署名資材の追跡を検査
+        run: |
+          tracked="$(git ls-files '*.p8' '*.p12' '*.cer' '*.certSigningRequest' '*.mobileprovision')"
+          if [ -n "$tracked" ]; then
+            echo "::error::秘密鍵または署名資材がGitに追跡されています"
+            printf '%s\n' "$tracked"
+            exit 1
+          fi
+
       - name: Xcodeバージョン確認
         run: xcodebuild -version && swift --version
 
       - name: パッケージテスト
         run: |
-          for pkg in DNGKit DecodeKit CacheKit XMPKit; do
+          for pkg in DNGKit DecodeKit CacheKit XMPKit AppCore; do
             echo "=== $pkg ==="
             swift test --package-path "Packages/$pkg"
           done
