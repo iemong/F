@@ -1,4 +1,5 @@
 import AppKit
+import AppCore
 import CacheKit
 import Foundation
 import Observation
@@ -30,19 +31,6 @@ struct RemovableVolume: Identifiable, Equatable {
     var id: URL { url }
 }
 
-/// グリッド/送り対象の絞り込み条件
-struct FilterState: Equatable {
-    /// 0 = 無効。1-5 = そのレート以上のみ（除外(-1)も落ちる）
-    var minRating = 0
-    var hideRejected = false
-    /// 特定カラーラベルのみ（nil = 無効）
-    var label: String?
-    /// 特定キーワードを含むもののみ（nil = 無効）
-    var keyword: String?
-
-    var isActive: Bool { minRating > 0 || hideRejected || label != nil || keyword != nil }
-}
-
 /// カラーラベル（Lightroom互換のxmp:Label値とキー割当 6-9）
 enum ColorLabel {
     static let all: [(key: String, value: String)] = [
@@ -50,26 +38,12 @@ enum ColorLabel {
     ]
 }
 
-/// 表示するファイル種別（ツールバーで切替、UserDefaultsに永続化）。
-/// DNG+JPG同時記録のフォルダで片方だけを見たいケースに応える
-enum FileTypeMode: String, CaseIterable {
-    case dng
-    case jpg
-    case both
-
+extension FileTypeMode {
     var displayName: String {
         switch self {
         case .dng: "DNG"
         case .jpg: "JPG"
         case .both: "両方"
-        }
-    }
-
-    func matches(_ url: URL) -> Bool {
-        switch self {
-        case .dng: !url.isJPEGFile
-        case .jpg: url.isJPEGFile
-        case .both: true
         }
     }
 }
@@ -140,27 +114,24 @@ final class AppModel {
     /// 除外(✕)のゴミ箱移動の確認ダイアログ
     var isConfirmingTrash = false
 
+    /// XMPのread-modify-writeを直列化し、キー連打時の更新逆転を防ぐ
+    @ObservationIgnored private let xmpWriter = XMPWriteCoordinator()
+    @ObservationIgnored private var xmpWriteRevision: UInt64 = 0
+
     /// ファイル種別モード適用後の全ファイル。「全n件」表示やエクスポート対象の基底
     var typedFiles: [URL] {
-        fileTypeMode == .both ? files : files.filter { fileTypeMode.matches($0) }
+        LibrarySelection.typedFiles(files, mode: fileTypeMode)
     }
 
     /// 種別モード+フィルター適用後の表示・送り対象。グリッドとナビゲーションはこちらを使う
     var visibleFiles: [URL] {
-        let base = typedFiles
-        guard filter.isActive else { return base }
-        return base.filter { passesFilter($0) }
-    }
-
-    private func passesFilter(_ url: URL) -> Bool {
-        let rating = ratings[url] ?? 0
-        if filter.hideRejected, rating == -1 { return false }
-        if filter.minRating > 0, rating < filter.minRating { return false }
-        if let wanted = filter.label, labels[url] != wanted { return false }
-        if let wanted = filter.keyword, !(keywords[url]?.contains(wanted) ?? false) {
-            return false
-        }
-        return true
+        LibrarySelection.visibleFiles(
+            files,
+            mode: fileTypeMode,
+            filter: filter,
+            ratings: ratings,
+            labels: labels,
+            keywords: keywords)
     }
 
     var positionText: String {
@@ -230,11 +201,15 @@ final class AppModel {
                 keywords[member] = parsed
             }
         }
-        Task.detached(priority: .utility) { [weak self] in
+        let revision = nextXMPWriteRevision()
+        let writer = xmpWriter
+        Task(priority: .utility) { [weak self] in
             do {
-                try XMPSidecar.writeKeywords(parsed, forImageAt: url)
+                let applied = try await writer.writeKeywords(
+                    parsed, forImageAt: url, revision: revision)
+                if applied { self?.finishXMPWrite(revision: revision) }
             } catch {
-                await self?.reportRatingError(error, for: url)
+                self?.reportXMPError(error, for: url, revision: revision)
             }
         }
     }
@@ -263,24 +238,12 @@ final class AppModel {
     /// 表示対象リストが変わった後（フィルター/種別切替）の選択位置の整合
     private func reselect(previous selected: URL?) {
         let visible = visibleFiles
-        if let selected {
-            if let index = visible.firstIndex(of: selected) {
-                currentIndex = index
-                return
-            }
-            // 同一ショットのペア相手（同basename）が残っていればそちらへ
-            let base = selected.deletingPathExtension()
-            if let index = visible.firstIndex(where: { $0.deletingPathExtension() == base }) {
-                currentIndex = index
-                if viewMode == .single { loadCurrent() }
-                return
-            }
-        }
-        currentIndex = min(max(0, currentIndex), max(0, visible.count - 1))
+        currentIndex = LibrarySelection.reselectedIndex(
+            previous: selected, currentIndex: currentIndex, visibleFiles: visible)
         if viewMode == .single {
             if visible.isEmpty {
                 viewMode = .grid
-            } else {
+            } else if visible[currentIndex] != selected {
                 loadCurrent()
             }
         }
@@ -413,27 +376,9 @@ final class AppModel {
         // SDカードは DCIM/100LEICA/ のようにサブフォルダに入るため再帰で探す。
         // 大きいツリーやUSB越しでも固まらないよう列挙はバックグラウンド
         Task.detached(priority: .userInitiated) { [weak self] in
-            let found = Self.findImages(in: url)
+            let found = ImageDiscovery.findImages(in: url)
             await self?.applyFolderContents(found, for: url)
         }
-    }
-
-    /// 再帰的にDNG/JPGを列挙（隠しファイル・パッケージ内は除外、上限1万件）。
-    /// 種別の絞り込みは列挙ではなく表示側（typedFiles）で行い、切替時の再走査を不要にする
-    private nonisolated static func findImages(in root: URL) -> [URL] {
-        let wanted: Set<String> = ["DNG", "JPG", "JPEG"]
-        var result: [URL] = []
-        let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants])
-        while let item = enumerator?.nextObject() as? URL {
-            if wanted.contains(item.pathExtension.uppercased()) {
-                result.append(item)
-                if result.count >= 10_000 { break }
-            }
-        }
-        return result.sorted { $0.path < $1.path }
     }
 
     private func applyFolderContents(_ found: [URL], for url: URL) {
@@ -682,8 +627,7 @@ final class AppModel {
     /// サイドカーは basename.xmp をペアで共有するため、レート等のメモリ状態も
     /// ペアでまとめて更新する（片方だけ更新すると再起動後の復元結果とズレる）
     private func pairURLs(of url: URL) -> [URL] {
-        let base = url.deletingPathExtension()
-        return files.filter { $0.deletingPathExtension() == base }
+        LibrarySelection.pairedURLs(of: url, in: files)
     }
 
     /// カラーラベルを適用（同じ色を再指定でトグル解除）してサイドカーへ書き込み
@@ -697,11 +641,15 @@ final class AppModel {
                 labels.removeValue(forKey: member)
             }
         }
-        Task.detached(priority: .utility) { [weak self] in
+        let revision = nextXMPWriteRevision()
+        let writer = xmpWriter
+        Task(priority: .utility) { [weak self] in
             do {
-                try XMPSidecar.writeLabel(new, forImageAt: url)
+                let applied = try await writer.writeLabel(
+                    new, forImageAt: url, revision: revision)
+                if applied { self?.finishXMPWrite(revision: revision) }
             } catch {
-                await self?.reportRatingError(error, for: url)
+                self?.reportXMPError(error, for: url, revision: revision)
             }
         }
     }
@@ -716,20 +664,36 @@ final class AppModel {
             ratings[member] = new
         }
 
-        // クリアかつサイドカー未作成なら、わざわざファイルを作らない
-        if new == 0, !FileManager.default.fileExists(atPath: XMPSidecar.url(for: url).path) {
-            return
-        }
-        Task.detached(priority: .utility) { [weak self] in
+        let revision = nextXMPWriteRevision()
+        let writer = xmpWriter
+        Task(priority: .utility) { [weak self] in
             do {
-                try XMPSidecar.writeRating(new, forImageAt: url)
+                let applied = try await writer.writeRating(
+                    new,
+                    forImageAt: url,
+                    revision: revision,
+                    createSidecarIfMissing: new != 0)
+                if applied { self?.finishXMPWrite(revision: revision) }
             } catch {
-                await self?.reportRatingError(error, for: url)
+                self?.reportXMPError(error, for: url, revision: revision)
             }
         }
     }
 
-    private func reportRatingError(_ error: any Error, for url: URL) {
+    private func nextXMPWriteRevision() -> UInt64 {
+        xmpWriteRevision &+= 1
+        return xmpWriteRevision
+    }
+
+    private func finishXMPWrite(revision: UInt64) {
+        guard revision == xmpWriteRevision, statusText.hasPrefix("XMP書き込み失敗") else {
+            return
+        }
+        statusText = ""
+    }
+
+    private func reportXMPError(_ error: any Error, for url: URL, revision: UInt64) {
+        guard revision == xmpWriteRevision else { return }
         statusText = "XMP書き込み失敗 (\(url.lastPathComponent)): \(error)"
     }
 
@@ -756,10 +720,12 @@ final class AppModel {
     }
 
     /// 書き出し先を選ばせてコピーを開始。同名ファイルは上書きせずスキップ
-    func runExport(scope: ExportScope, includeSidecars: Bool) {
+    func runExport(
+        scope: ExportScope, includeSidecars: Bool, verifyChecksum: Bool
+    ) {
         guard exportProgress == nil else { return }
         let sources = exportURLs(for: scope)
-        guard !sources.isEmpty else { return }
+        guard !sources.isEmpty, let sourceRoot = currentFolder else { return }
 
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -769,22 +735,58 @@ final class AppModel {
         panel.message = "書き出し先フォルダを選択"
         guard panel.runModal() == .OK, let destination = panel.url else { return }
 
-        exportProgress = ExportProgress(completed: 0, total: sources.count)
+        let plan = Exporter.makePlan(
+            sources: sources,
+            sourceRoot: sourceRoot,
+            destination: destination,
+            includeSidecars: includeSidecars)
+        guard confirmExportConflicts(plan) else { return }
+
+        exportProgress = ExportProgress(
+            completed: 0, total: plan.items.count + plan.sidecars.count)
         exportTask = Task.detached(priority: .userInitiated) { [weak self] in
             var result = ExportResult()
-            for (index, url) in sources.enumerated() {
+            var completed = 0
+            var copiedImageSources = Set<URL>()
+            for (index, item) in plan.items.enumerated() {
                 if Task.isCancelled { break }
-                switch Exporter.copyItem(
-                    at: url, into: destination, includeSidecar: includeSidecars)
-                {
-                case .copied: result.copied += 1
-                case .skippedExisting: result.skipped += 1
-                case .failed: result.failed += 1
+                let outcome = Exporter.copyImage(
+                    item, verifyChecksum: verifyChecksum)
+                result.recordImage(outcome)
+                if outcome == .copied { copiedImageSources.insert(item.sourceImage) }
+                completed = index + 1
+                await self?.updateExportProgress(completed: completed)
+            }
+            if !Task.isCancelled {
+                for sidecar in plan.sidecars {
+                    if Task.isCancelled { break }
+                    let shouldCopy = sidecar.relatedImageSources.contains {
+                        copiedImageSources.contains($0)
+                    }
+                    let outcome = shouldCopy
+                        ? Exporter.copySidecar(
+                            sidecar, verifyChecksum: verifyChecksum)
+                        : .notAttempted
+                    result.recordSidecar(outcome)
+                    completed += 1
+                    await self?.updateExportProgress(completed: completed)
                 }
-                await self?.updateExportProgress(completed: index + 1)
             }
             await self?.finishExport(result, cancelled: Task.isCancelled)
         }
+    }
+
+    private func confirmExportConflicts(_ plan: ExportPlan) -> Bool {
+        guard plan.conflictCount > 0 else { return true }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "書き出し先に同名ファイルがあります"
+        alert.informativeText =
+            "画像 \(plan.imageConflictCount)件、XMP \(plan.sidecarConflictCount)件は"
+            + "上書きせずスキップします。"
+        alert.addButton(withTitle: "既存ファイルを残して続行")
+        alert.addButton(withTitle: "キャンセル")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     func cancelExport() {
@@ -799,9 +801,25 @@ final class AppModel {
         exportProgress = nil
         exportTask = nil
         isExportSheetPresented = false
-        var parts = ["コピー \(result.copied)件"]
-        if result.skipped > 0 { parts.append("同名スキップ \(result.skipped)件") }
-        if result.failed > 0 { parts.append("失敗 \(result.failed)件") }
+        var parts = ["画像コピー \(result.imagesCopied)件"]
+        if result.imagesSkipped > 0 {
+            parts.append("画像スキップ \(result.imagesSkipped)件")
+        }
+        if result.imagesFailed > 0 { parts.append("画像失敗 \(result.imagesFailed)件") }
+        if result.imagesVerificationFailed > 0 {
+            parts.append("画像検証失敗 \(result.imagesVerificationFailed)件")
+        }
+        if result.sidecarsCopied > 0 { parts.append("XMPコピー \(result.sidecarsCopied)件") }
+        if result.sidecarsSkipped > 0 {
+            parts.append("XMPスキップ \(result.sidecarsSkipped)件")
+        }
+        if result.sidecarsFailed > 0 { parts.append("XMP失敗 \(result.sidecarsFailed)件") }
+        if result.sidecarsNotAttempted > 0 {
+            parts.append("XMP未実行 \(result.sidecarsNotAttempted)件")
+        }
+        if result.sidecarsVerificationFailed > 0 {
+            parts.append("XMP検証失敗 \(result.sidecarsVerificationFailed)件")
+        }
         statusText = (cancelled ? "書き出し中断: " : "書き出し完了: ") + parts.joined(separator: " / ")
     }
 
@@ -817,36 +835,44 @@ final class AppModel {
     func trashRejected() {
         let rejected = typedFiles.filter { ratings[$0] == -1 }
         guard !rejected.isEmpty else { return }
-        // 共有サイドカー（basename.xmp）は、ペア相手（DNG⇔JPG）が1つでも残るなら
-        // 残す。捨てられる側と一緒に消すと残った側のレート等が失われるため
-        let rejectedSet = Set(rejected)
-        let trashableSidecars = Set(
-            rejected
-                .filter { url in pairURLs(of: url).allSatisfy { rejectedSet.contains($0) } }
-                .map { XMPSidecar.url(for: $0) })
+        let plan = LibraryOperations.trashPlan(rejectedURLs: rejected, allFiles: files)
         Task.detached(priority: .userInitiated) { [weak self] in
             let fm = FileManager.default
             var trashed: [URL] = []
             var failed = 0
-            for url in rejected {
+            var sidecarFailed = 0
+            for url in plan.imageURLs {
                 do {
                     try fm.trashItem(at: url, resultingItemURL: nil)
-                    let sidecar = XMPSidecar.url(for: url)
-                    if trashableSidecars.contains(sidecar),
-                        fm.fileExists(atPath: sidecar.path)
-                    {
-                        try? fm.trashItem(at: sidecar, resultingItemURL: nil)
-                    }
                     trashed.append(url)
                 } catch {
                     failed += 1
                 }
             }
-            await self?.removeTrashedFiles(trashed, failed: failed)
+            // ペアの一部だけ移動に失敗した場合は、残った画像の共有XMPを保護する。
+            let trashedSet = Set(trashed)
+            for sidecar in plan.sidecarURLs {
+                let base = sidecar.deletingPathExtension()
+                let members = plan.imageURLs.filter {
+                    $0.deletingPathExtension() == base
+                }
+                guard members.allSatisfy({ trashedSet.contains($0) }),
+                    fm.fileExists(atPath: sidecar.path)
+                else { continue }
+                do {
+                    try fm.trashItem(at: sidecar, resultingItemURL: nil)
+                } catch {
+                    sidecarFailed += 1
+                }
+            }
+            await self?.removeTrashedFiles(
+                trashed, failed: failed, sidecarFailed: sidecarFailed)
         }
     }
 
-    private func removeTrashedFiles(_ trashed: [URL], failed: Int) {
+    private func removeTrashedFiles(
+        _ trashed: [URL], failed: Int, sidecarFailed: Int
+    ) {
         let removed = Set(trashed)
         let selected = currentURL
         files.removeAll { removed.contains($0) }
@@ -867,10 +893,11 @@ final class AppModel {
                 loadCurrent()
             }
         }
-        statusText =
-            failed > 0
-            ? "ゴミ箱へ移動: \(trashed.count)件（失敗 \(failed)件）"
-            : "ゴミ箱へ移動: \(trashed.count)件"
+        var details: [String] = []
+        if failed > 0 { details.append("画像失敗 \(failed)件") }
+        if sidecarFailed > 0 { details.append("XMP失敗 \(sidecarFailed)件") }
+        statusText = "ゴミ箱へ移動: \(trashed.count)件"
+        if !details.isEmpty { statusText += "（\(details.joined(separator: " / "))）" }
     }
 
     /// レンダラから present 完了が通知される。キー押下→表示のレイテンシ確定点。

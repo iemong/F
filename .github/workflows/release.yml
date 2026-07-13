@@ -53,7 +53,7 @@ jobs:
 
       - name: パッケージテスト
         run: |
-          for pkg in DNGKit DecodeKit CacheKit XMPKit; do
+          for pkg in DNGKit DecodeKit CacheKit XMPKit AppCore; do
             swift test --package-path "Packages/$pkg"
           done
 

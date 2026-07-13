@@ -1,3 +1,4 @@
+import AppCore
 import CoreGraphics
 import DNGKit
 import DecodeKit
@@ -23,14 +24,6 @@ struct DisplayFrame: Sendable {
 
 enum ImagePipelineError: Error {
     case undecodable(String)
-}
-
-extension URL {
-    /// 拡張子ベースのJPG判定（表示対象の列挙・デコード経路の分岐で共用）
-    var isJPEGFile: Bool {
-        let ext = pathExtension.uppercased()
-        return ext == "JPG" || ext == "JPEG"
-    }
 }
 
 /// 画像ファイル → 表示用RGBA。種別・機種別の最適経路を選ぶ:

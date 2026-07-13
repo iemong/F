@@ -1,3 +1,4 @@
+import AppCore
 import DNGKit
 import Foundation
 import ImageIO
