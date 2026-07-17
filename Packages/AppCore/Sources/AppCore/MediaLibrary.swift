@@ -23,26 +23,45 @@ public enum FileTypeMode: String, CaseIterable, Sendable {
     }
 }
 
+public enum EvaluationFilter: String, CaseIterable, Sendable {
+    case all
+    case unrated
+    case rated
+}
+
 public struct FilterState: Equatable, Sendable {
     public var minRating: Int
     public var hideRejected: Bool
     public var label: String?
     public var keyword: String?
+    public var evaluation: EvaluationFilter
 
     public init(
         minRating: Int = 0,
         hideRejected: Bool = false,
         label: String? = nil,
-        keyword: String? = nil
+        keyword: String? = nil,
+        evaluation: EvaluationFilter = .all
     ) {
         self.minRating = minRating
         self.hideRejected = hideRejected
         self.label = label
         self.keyword = keyword
+        self.evaluation = evaluation
     }
 
     public var isActive: Bool {
-        minRating > 0 || hideRejected || label != nil || keyword != nil
+        minRating > 0 || hideRejected || label != nil || keyword != nil || evaluation != .all
+    }
+}
+
+public struct SelectionProgress: Equatable, Sendable {
+    public let evaluated: Int
+    public let total: Int
+
+    public init(evaluated: Int, total: Int) {
+        self.evaluated = evaluated
+        self.total = total
     }
 }
 
@@ -63,6 +82,8 @@ public enum LibrarySelection {
         guard filter.isActive else { return typed }
         return typed.filter { url in
             let rating = ratings[url] ?? 0
+            if filter.evaluation == .unrated, rating != 0 { return false }
+            if filter.evaluation == .rated, rating == 0 { return false }
             if filter.hideRejected, rating == -1 { return false }
             if filter.minRating > 0, rating < filter.minRating { return false }
             if let wanted = filter.label, labels[url] != wanted { return false }
@@ -78,6 +99,19 @@ public enum LibrarySelection {
     public static func pairedURLs(of url: URL, in files: [URL]) -> [URL] {
         let base = url.deletingPathExtension()
         return files.filter { $0.deletingPathExtension() == base }
+    }
+
+    /// DNG/JPGペアを同じbasenameの1ショットとして数えた選別進捗。
+    public static func selectionProgress(
+        _ files: [URL], mode: FileTypeMode, ratings: [URL: Int]
+    ) -> SelectionProgress {
+        let shots = Dictionary(grouping: typedFiles(files, mode: mode)) {
+            $0.deletingPathExtension()
+        }
+        let evaluated = shots.values.count { members in
+            members.contains { (ratings[$0] ?? 0) != 0 }
+        }
+        return SelectionProgress(evaluated: evaluated, total: shots.count)
     }
 
     /// 表示条件変更後の選択位置。元ファイル、同basenameのペア、現在位置の順で維持する。

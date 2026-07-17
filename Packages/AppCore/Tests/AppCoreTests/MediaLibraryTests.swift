@@ -31,6 +31,32 @@ struct LibrarySelectionTests {
         #expect(visible == [dng])
     }
 
+    @Test func 未評価と評価済みを絞り込める() {
+        let files = [dng, jpg, other]
+        let ratings = [dng: 4, jpg: 4, other: 0]
+        #expect(
+            LibrarySelection.visibleFiles(
+                files, mode: .dng, filter: FilterState(evaluation: .unrated),
+                ratings: ratings, labels: [:], keywords: [:]) == [other])
+        #expect(
+            LibrarySelection.visibleFiles(
+                files, mode: .dng, filter: FilterState(evaluation: .rated),
+                ratings: ratings, labels: [:], keywords: [:]) == [dng])
+    }
+
+    @Test func 除外も評価済みとして扱う() {
+        let visible = LibrarySelection.visibleFiles(
+            [dng, other], mode: .dng, filter: FilterState(evaluation: .rated),
+            ratings: [dng: -1], labels: [:], keywords: [:])
+        #expect(visible == [dng])
+    }
+
+    @Test func 進捗ではDNGとJPGを1ショットとして数える() {
+        let progress = LibrarySelection.selectionProgress(
+            [dng, jpg, other], mode: .both, ratings: [jpg: 5])
+        #expect(progress == SelectionProgress(evaluated: 1, total: 2))
+    }
+
     @Test func 種別切替時に同じショットのペアへ移る() {
         let index = LibrarySelection.reselectedIndex(
             previous: dng, currentIndex: 8, visibleFiles: [jpg, other])

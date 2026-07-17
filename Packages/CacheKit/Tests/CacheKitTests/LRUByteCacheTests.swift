@@ -165,6 +165,17 @@ struct LRUByteCacheTests {
         #expect(value == 5)
     }
 
+    @Test func value完了時点でキャッシュ挿入も完了している() async throws {
+        let cache = LRUByteCache<String, [UInt8]>(byteLimit: 100) { $0.count }
+
+        let value = try await cache.value(for: "loaded") {
+            [UInt8](repeating: 1, count: 40)
+        }
+
+        #expect(await cache.peek("loaded") == value)
+        #expect(await cache.currentStats().totalBytes == 40)
+    }
+
     @Test func コスト計算に基づく合計バイト管理() async throws {
         let cache = LRUByteCache<String, [UInt8]>(byteLimit: 100) { $0.count }
         _ = try await cache.value(for: "a") { [UInt8](repeating: 0, count: 40) }

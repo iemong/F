@@ -16,6 +16,19 @@ struct FApp: App {
             ContentView(model: model)
         }
         .commands {
+            CommandGroup(replacing: .undoRedo) {
+                Button("メタデータ変更を取り消す") {
+                    model.undoMetadata()
+                }
+                .keyboardShortcut("z", modifiers: .command)
+                .disabled(!model.canUndoMetadata)
+
+                Button("メタデータ変更をやり直す") {
+                    model.redoMetadata()
+                }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                .disabled(!model.canRedoMetadata)
+            }
             CommandGroup(after: .appInfo) {
                 Button("アップデートを確認…") {
                     updaterController.checkForUpdates(nil)
@@ -72,6 +85,16 @@ struct FApp: App {
                 }
                 .keyboardShortcut("-", modifiers: .command)
             }
+            CommandMenu("選別") {
+                Button("次の未評価へ") {
+                    model.moveToNextUnrated()
+                }
+                .keyboardShortcut("u", modifiers: [])
+                .disabled(model.files.isEmpty)
+            }
+        }
+        Settings {
+            SettingsView(model: model)
         }
     }
 }
@@ -79,6 +102,7 @@ struct FApp: App {
 struct ContentView: View {
     @Bindable var model: AppModel
     @FocusState private var isFocused: Bool
+    @State private var isShortcutOverlayPresented = false
 
     var body: some View {
         ZStack {
@@ -97,12 +121,15 @@ struct ContentView: View {
                         presented: presented,
                         zoomMode: model.zoomMode,
                         onPresent: { id, time in model.frameDidPresent(id: id, presentedTime: time) },
-                        register: { view in model.registerRenderView(view) }
+                        register: { view in model.registerRenderView(view) },
+                        onPanChange: { _ in }
                     )
                     .ignoresSafeArea()
                 } else {
                     emptyState
                 }
+            case .comparison:
+                ComparisonView(model: model)
             }
 
             VStack(spacing: 0) {
@@ -116,6 +143,12 @@ struct ContentView: View {
                 {
                     FilmstripView(model: model)
                 }
+                if model.showShortcutBar {
+                    ShortcutBarView(
+                        mode: model.viewMode,
+                        hasFiles: !model.visibleFiles.isEmpty,
+                        hasMultipleSelection: model.gridSelection.count > 1)
+                }
             }
 
             if model.showInfoPanel, let url = model.currentURL {
@@ -127,6 +160,13 @@ struct ContentView: View {
                     Spacer()
                 }
                 .padding(12)
+            }
+
+            if isShortcutOverlayPresented {
+                ShortcutOverlayView {
+                    isShortcutOverlayPresented = false
+                }
+                .zIndex(10)
             }
         }
         .focusable()
@@ -156,13 +196,21 @@ struct ContentView: View {
         .onKeyPress(.space) {
             switch model.viewMode {
             case .grid: model.openSelected()
-            case .single: model.toggleZoom()
+            case .single, .comparison: model.toggleZoom()
             }
             return .handled
         }
         .onKeyPress(.escape) {
-            guard model.viewMode == .single else { return .ignored }
+            if isShortcutOverlayPresented {
+                isShortcutOverlayPresented = false
+                return .handled
+            }
+            guard model.viewMode != .grid else { return .ignored }
             model.showGrid()
+            return .handled
+        }
+        .onKeyPress(keys: ["?"]) { _ in
+            isShortcutOverlayPresented.toggle()
             return .handled
         }
         .onKeyPress(keys: ["z"]) { _ in
@@ -171,7 +219,7 @@ struct ContentView: View {
         }
         .onKeyPress(keys: ["g"]) { _ in
             switch model.viewMode {
-            case .single: model.showGrid()
+            case .single, .comparison: model.showGrid()
             case .grid: model.openSelected()
             }
             return .handled
@@ -190,6 +238,19 @@ struct ContentView: View {
         }
         .onKeyPress(keys: ["f"]) { _ in
             model.showFilmstrip.toggle()
+            return .handled
+        }
+        .onKeyPress(keys: ["c"]) { _ in
+            if model.viewMode == .grid { model.beginComparison() }
+            return .handled
+        }
+        .onKeyPress(keys: ["a", "b"]) { press in
+            guard model.viewMode == .comparison else { return .ignored }
+            model.chooseComparisonWinner(slot: press.characters.lowercased() == "a" ? 0 : 1)
+            return .handled
+        }
+        .onKeyPress(keys: ["u"]) { _ in
+            model.moveToNextUnrated()
             return .handled
         }
         .sheet(isPresented: $model.isEditingKeywords) {
@@ -269,6 +330,21 @@ struct ContentView: View {
 
     private var filterMenu: some View {
         Menu {
+            Picker(
+                "評価状態",
+                selection: Binding(
+                    get: { model.filter.evaluation },
+                    set: { value in
+                        var updated = model.filter
+                        updated.evaluation = value
+                        model.setFilter(updated)
+                    })
+            ) {
+                Text("すべて").tag(EvaluationFilter.all)
+                Text("未評価のみ").tag(EvaluationFilter.unrated)
+                Text("評価済みのみ").tag(EvaluationFilter.rated)
+            }
+            Divider()
             Picker(
                 "レート",
                 selection: Binding(
@@ -371,11 +447,19 @@ struct ContentView: View {
             if !model.positionText.isEmpty {
                 Text(model.positionText)
             }
+            if model.gridSelection.count > 1 {
+                Text("\(model.gridSelection.count)枚選択")
+                    .foregroundStyle(.cyan)
+            }
+            if !model.selectionProgressText.isEmpty {
+                Text(model.selectionProgressText)
+                    .foregroundStyle(.cyan.opacity(0.9))
+            }
             if model.viewMode == .grid {
                 if let url = model.currentURL {
                     Text(url.lastPathComponent)
                 }
-            } else if !model.fileNameText.isEmpty {
+            } else if model.viewMode == .single, !model.fileNameText.isEmpty {
                 Text(model.fileNameText)
             }
             if !model.ratingText.isEmpty {

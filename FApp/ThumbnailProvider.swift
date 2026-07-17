@@ -14,15 +14,31 @@ struct ThumbImage: @unchecked Sendable {
     var byteCost: Int { cgImage.width * cgImage.height * 4 }
 }
 
+private struct ThumbnailCacheKey: Hashable, Sendable {
+    let url: URL
+    let byteCount: Int
+    let modifiedAt: TimeInterval
+
+    init(url: URL) {
+        self.url = url
+        let values = try? url.resourceValues(forKeys: [
+            .fileSizeKey, .contentModificationDateKey,
+        ])
+        byteCount = values?.fileSize ?? -1
+        modifiedAt = values?.contentModificationDate?.timeIntervalSince1970 ?? -1
+    }
+}
+
 /// DNGの埋め込みプレビューからサムネイルを生成しLRUキャッシュする。
 /// ソースはIFD0サムネ or MakerNotesプレビュー（bestPreviewが機種差を吸収）
 final class ThumbnailProvider: Sendable {
-    private let cache = LRUByteCache<URL, ThumbImage>(
+    private let cache = LRUByteCache<ThumbnailCacheKey, ThumbImage>(
         byteLimit: 320 * 1024 * 1024
     ) { $0.byteCost }
 
     func image(for url: URL) async -> ThumbImage? {
-        try? await cache.value(for: url) {
+        let key = ThumbnailCacheKey(url: url)
+        return try? await cache.value(for: key) {
             try Task.checkCancellation()
             return try Self.makeThumbnail(for: url)
         }
@@ -74,4 +90,68 @@ final class ThumbnailProvider: Sendable {
         else { throw ImagePipelineError.undecodable("JPGサムネ生成失敗") }
         return ThumbImage(cgImage: thumbnail, rotationDegrees: 0)
     }
+}
+
+enum ThumbnailAnalysis {
+    /// 9×8の輝度差から64bit dHashを作る。大規模モデルを使わない軽量な類似度補正。
+    static func perceptualHash(of image: CGImage) -> UInt64? {
+        let width = 9
+        let height = 8
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.linearGray) else { return nil }
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.none.rawValue)
+            else { return false }
+            context.interpolationQuality = .low
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return nil }
+        var hash: UInt64 = 0
+        var bit = 0
+        for y in 0 ..< height {
+            for x in 0 ..< (width - 1) {
+                if pixels[y * width + x] > pixels[y * width + x + 1] {
+                    hash |= UInt64(1) << UInt64(bit)
+                }
+                bit += 1
+            }
+        }
+        return hash
+    }
+
+    static func qualityMetrics(of image: CGImage) -> QualityMetrics? {
+        let width = 160
+        let height = 160
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.linearGray) else { return nil }
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.none.rawValue)
+            else { return false }
+            context.interpolationQuality = .medium
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return nil }
+        return TechnicalQualityAnalyzer.analyze(luma: pixels, width: width, height: height)
+    }
+}
+
+/// 将来Vision顔検出を追加する際の差し込み口。初期版では実装を注入しない。
+protocol OptionalFaceAnalysisProviding {
+    func faceCount(in thumbnail: CGImage) -> Int?
 }
