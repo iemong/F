@@ -15,15 +15,19 @@ struct MetalImageView: NSViewRepresentable {
     /// 生成された NSView をモデルへ渡す（キー送りヒット時に SwiftUI の
     /// 更新サイクル1フレームを待たず直接描画するための経路）
     let register: @MainActor (MetalLayerView) -> Void
+    /// 比較表示でパン位置をもう一方へ同期する。
+    let onPanChange: @MainActor (CGPoint) -> Void
 
     func makeNSView(context: Context) -> MetalLayerView {
         let view = MetalLayerView()
+        view.onPanChange = onPanChange
         register(view)
         return view
     }
 
     func updateNSView(_ view: MetalLayerView, context: Context) {
         view.onPresent = onPresent
+        view.onPanChange = onPanChange
         view.setZoomMode(zoomMode)
         view.show(presented)
     }
@@ -44,6 +48,7 @@ final class MetalLayerView: NSView {
     private var renderedPan = CGPoint.zero
 
     var onPresent: (@MainActor (Int, CFTimeInterval) -> Void)?
+    var onPanChange: (@MainActor (CGPoint) -> Void)?
 
     private var metalLayer: CAMetalLayer? { layer as? CAMetalLayer }
 
@@ -86,6 +91,13 @@ final class MetalLayerView: NSView {
         render()
     }
 
+    func setPanOffset(_ offset: CGPoint) {
+        guard zoomMode == .actualSize, panOffset != offset else { return }
+        panOffset = offset
+        clampPan()
+        render()
+    }
+
     override func layout() {
         super.layout()
         updateDrawableSize()
@@ -106,6 +118,7 @@ final class MetalLayerView: NSView {
         panOffset.y -= event.deltaY * scale // 画面下ドラッグ=コンテンツ下移動(NDCは上が正)
         clampPan()
         render()
+        onPanChange?(panOffset)
     }
 
     private func clampPan() {

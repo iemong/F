@@ -16,6 +16,7 @@ enum ZoomMode {
 enum ViewMode {
     case grid
     case single
+    case comparison
 }
 
 /// キャッシュキー: 通常表示(display)と100%等倍用フル解像(full)を区別する
@@ -58,6 +59,12 @@ final class AppModel {
     private(set) var latencyText = ""
     private(set) var viewMode: ViewMode = .single
     private(set) var zoomMode: ZoomMode = .fit
+    /// 比較候補は配列で保持し、将来の4枚比較へ拡張可能にする。
+    private(set) var comparisonURLs: [URL] = []
+    private(set) var comparisonFrames: [URL: PresentedFrame] = [:]
+    /// グリッドで一括操作する選択。フィルター変更時は表示中の要素との共通部分を残す。
+    private(set) var gridSelection: Set<URL> = []
+    @ObservationIgnored private var gridSelectionAnchor: URL?
     /// グリッドの列数（ビュー側のレイアウトから通知される。上下キー移動に使う）
     var gridColumns = 5
     /// グリッドのセルサイズ（スライダーで変更、UserDefaultsに永続化）
@@ -76,6 +83,32 @@ final class AppModel {
     var showFilmstrip = true {
         didSet {
             UserDefaults.standard.set(showFilmstrip, forKey: "showFilmstrip")
+        }
+    }
+    /// 現在の画面で使える主要ショートカットを示す下部バー（既定は表示）
+    var showShortcutBar = true {
+        didSet {
+            UserDefaults.standard.set(showShortcutBar, forKey: "showShortcutBar")
+        }
+    }
+    /// レート・除外・カラーラベル変更後に次の写真へ進む（既定は無効）
+    var autoAdvanceAfterRating = false {
+        didSet {
+            UserDefaults.standard.set(autoAdvanceAfterRating, forKey: "autoAdvanceAfterRating")
+        }
+    }
+    /// 撮影時刻・連番・軽量画像ハッシュによる近接カットの自動スタック（既定は無効）
+    var autoStackNearbyShots = false {
+        didSet {
+            UserDefaults.standard.set(autoStackNearbyShots, forKey: "autoStackNearbyShots")
+            scheduleStackAnalysis()
+        }
+    }
+    /// 既存サムネイルを利用する軽量な技術品質解析（既定は無効）
+    var analyzeTechnicalQuality = false {
+        didSet {
+            UserDefaults.standard.set(analyzeTechnicalQuality, forKey: "analyzeTechnicalQuality")
+            scheduleQualityAnalysis()
         }
     }
     /// 表示するファイル種別（UserDefaultsに永続化、既定はDNGのみ）。
@@ -117,6 +150,17 @@ final class AppModel {
     /// XMPのread-modify-writeを直列化し、キー連打時の更新逆転を防ぐ
     @ObservationIgnored private let xmpWriter = XMPWriteCoordinator()
     @ObservationIgnored private var xmpWriteRevision: UInt64 = 0
+    @ObservationIgnored private var metadataHistory = MetadataHistory()
+    private(set) var canUndoMetadata = false
+    private(set) var canRedoMetadata = false
+    private(set) var photoStacks: [PhotoStack] = []
+    private(set) var expandedStackIDs: Set<URL> = []
+    @ObservationIgnored private let selectionAssistCache = SelectionAssistCache()
+    @ObservationIgnored private var stackAnalysisTask: Task<Void, Never>?
+    @ObservationIgnored private var stackAnalysisGeneration = 0
+    private(set) var qualityByURL: [URL: QualityMetrics] = [:]
+    @ObservationIgnored private var qualityAnalysisTask: Task<Void, Never>?
+    @ObservationIgnored private var qualityAnalysisGeneration = 0
 
     /// ファイル種別モード適用後の全ファイル。「全n件」表示やエクスポート対象の基底
     var typedFiles: [URL] {
@@ -134,11 +178,52 @@ final class AppModel {
             keywords: keywords)
     }
 
+    /// グリッド専用の表示対象。折りたたみ中は各スタックの代表写真だけを返す。
+    var gridVisibleFiles: [URL] {
+        let visible = visibleFiles
+        guard autoStackNearbyShots, !photoStacks.isEmpty else { return visible }
+        return PhotoStackAnalyzer.gridFiles(
+            visibleFiles: visible, stacks: photoStacks,
+            expandedStackIDs: expandedStackIDs)
+    }
+
+    func stack(for url: URL) -> PhotoStack? {
+        let base = url.deletingPathExtension()
+        return photoStacks.first { stack in
+            stack.members.contains { $0.deletingPathExtension() == base }
+        }
+    }
+
+    func toggleStack(containing url: URL) {
+        guard let stack = stack(for: url) else { return }
+        if !expandedStackIDs.insert(stack.id).inserted {
+            expandedStackIDs.remove(stack.id)
+        }
+    }
+
+    func qualityRank(for url: URL, in stack: PhotoStack?) -> (rank: Int, total: Int)? {
+        guard autoStackNearbyShots, analyzeTechnicalQuality, let stack else { return nil }
+        let scored = stack.members.compactMap { member in
+            qualityByURL[member].map { (member, $0.overallScore) }
+        }.sorted { $0.1 > $1.1 }
+        guard scored.count == stack.members.count,
+            let index = scored.firstIndex(where: { $0.0 == url })
+        else { return nil }
+        return (index + 1, scored.count)
+    }
+
     var positionText: String {
         let visible = visibleFiles
         guard !visible.isEmpty || filter.isActive else { return "" }
         let base = visible.isEmpty ? "0/0" : "\(currentIndex + 1)/\(visible.count)"
         return filter.isActive ? base + " (全\(typedFiles.count))" : base
+    }
+
+    var selectionProgressText: String {
+        let progress = LibrarySelection.selectionProgress(
+            files, mode: fileTypeMode, ratings: ratings)
+        guard progress.total > 0 else { return "" }
+        return "選別済み \(progress.evaluated) / \(progress.total)"
     }
 
     var fileNameText: String {
@@ -181,37 +266,33 @@ final class AppModel {
     // MARK: - キーワード編集（Tキー）
 
     func beginKeywordEditing() {
-        guard let url = currentURL else { return }
-        keywordDraft = (keywords[url] ?? []).joined(separator: ", ")
+        guard let url = metadataTargetURLs.first else { return }
+        let targets = metadataTargetURLs
+        let common = targets.dropFirst().reduce(Set(keywords[url] ?? [])) { result, target in
+            result.intersection(keywords[target] ?? [])
+        }
+        keywordDraft = (targets.count == 1 ? (keywords[url] ?? []) : Array(common).sorted())
+            .joined(separator: ", ")
         isEditingKeywords = true
     }
 
     func commitKeywordEditing() {
         defer { isEditingKeywords = false }
-        guard let url = currentURL else { return }
+        let targets = metadataShotTargets
+        guard let url = targets.first?.imageURL else { return }
         var seen = Set<String>()
         let parsed = keywordDraft
             .split(whereSeparator: { $0 == "," || $0 == "、" })
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && seen.insert($0).inserted }
-        for member in pairURLs(of: url) {
-            if parsed.isEmpty {
-                keywords.removeValue(forKey: member)
-            } else {
-                keywords[member] = parsed
-            }
+        let edits = targets.compactMap { target -> MetadataEdit? in
+            let before = keywords[target.imageURL] ?? []
+            guard parsed != before else { return nil }
+            return MetadataEdit(
+                imageURL: target.imageURL, memberURLs: target.memberURLs,
+                before: .keywords(before), after: .keywords(parsed))
         }
-        let revision = nextXMPWriteRevision()
-        let writer = xmpWriter
-        Task(priority: .utility) { [weak self] in
-            do {
-                let applied = try await writer.writeKeywords(
-                    parsed, forImageAt: url, revision: revision)
-                if applied { self?.finishXMPWrite(revision: revision) }
-            } catch {
-                self?.reportXMPError(error, for: url, revision: revision)
-            }
-        }
+        applyNewMetadataTransaction(edits, focusURL: url)
     }
 
     func cancelKeywordEditing() {
@@ -223,7 +304,33 @@ final class AppModel {
         guard newFilter != filter else { return }
         let selected = currentURL
         filter = newFilter
+        gridSelection.formIntersection(visibleFiles)
         reselect(previous: selected)
+    }
+
+    /// 現在の他フィルターは維持し、評価状態だけを「未評価」にして次候補へ移る。
+    /// 末尾からは先頭へ循環する。
+    func moveToNextUnrated() {
+        let previousURL = currentURL
+        var candidateFilter = filter
+        candidateFilter.evaluation = .unrated
+        let candidates = LibrarySelection.visibleFiles(
+            files, mode: fileTypeMode, filter: candidateFilter, ratings: ratings,
+            labels: labels, keywords: keywords)
+        guard !candidates.isEmpty else {
+            statusText = "未評価の写真はありません"
+            return
+        }
+
+        let typed = typedFiles
+        let previousTypedIndex = previousURL.flatMap { typed.firstIndex(of: $0) } ?? -1
+        let destination = candidates.first {
+            (typed.firstIndex(of: $0) ?? -1) > previousTypedIndex
+        } ?? candidates[0]
+        filter = candidateFilter
+        currentIndex = candidates.firstIndex(of: destination) ?? 0
+        statusText = ""
+        if viewMode == .single { loadCurrent() }
     }
 
     /// ファイル種別モードの切替。選択中のファイルが消える場合は
@@ -233,6 +340,8 @@ final class AppModel {
         let selected = currentURL
         fileTypeMode = mode
         reselect(previous: selected)
+        scheduleStackAnalysis()
+        scheduleQualityAnalysis()
     }
 
     /// 表示対象リストが変わった後（フィルター/種別切替）の選択位置の整合
@@ -269,9 +378,21 @@ final class AppModel {
     /// 表示中の MetalLayerView への直結参照。SwiftUI の更新サイクル
     /// （+1フレーム）を待たずに同一ランループで描画するための高速経路
     @ObservationIgnored private weak var renderView: MetalLayerView?
+    @ObservationIgnored private weak var comparisonLeftView: MetalLayerView?
+    @ObservationIgnored private weak var comparisonRightView: MetalLayerView?
 
     func registerRenderView(_ view: MetalLayerView) {
         renderView = view
+    }
+
+    func registerComparisonView(_ view: MetalLayerView, slot: Int) {
+        if slot == 0 { comparisonLeftView = view } else { comparisonRightView = view }
+    }
+
+    func synchronizeComparisonPan(_ offset: CGPoint) {
+        guard viewMode == .comparison else { return }
+        comparisonLeftView?.setPanOffset(offset)
+        comparisonRightView?.setPanOffset(offset)
     }
 
     /// 直近のキー送り方向（+1/-1）。先読み窓をこの向きに寄せる
@@ -316,6 +437,20 @@ final class AppModel {
         showInfoPanel = UserDefaults.standard.bool(forKey: "showInfoPanel")
         if UserDefaults.standard.object(forKey: "showFilmstrip") != nil {
             showFilmstrip = UserDefaults.standard.bool(forKey: "showFilmstrip")
+        }
+        if UserDefaults.standard.object(forKey: "showShortcutBar") != nil {
+            showShortcutBar = UserDefaults.standard.bool(forKey: "showShortcutBar")
+        }
+        if UserDefaults.standard.object(forKey: "autoAdvanceAfterRating") != nil {
+            autoAdvanceAfterRating = UserDefaults.standard.bool(
+                forKey: "autoAdvanceAfterRating")
+        }
+        if UserDefaults.standard.object(forKey: "autoStackNearbyShots") != nil {
+            autoStackNearbyShots = UserDefaults.standard.bool(forKey: "autoStackNearbyShots")
+        }
+        if UserDefaults.standard.object(forKey: "analyzeTechnicalQuality") != nil {
+            analyzeTechnicalQuality = UserDefaults.standard.bool(
+                forKey: "analyzeTechnicalQuality")
         }
         if let saved = UserDefaults.standard.string(forKey: "fileTypeMode"),
             let mode = FileTypeMode(rawValue: saved)
@@ -370,6 +505,13 @@ final class AppModel {
         labels = [:]
         keywords = [:]
         filter = FilterState()
+        photoStacks = []
+        expandedStackIDs = []
+        stackAnalysisTask?.cancel()
+        qualityByURL = [:]
+        qualityAnalysisTask?.cancel()
+        metadataHistory.removeAll()
+        updateHistoryAvailability()
         zoomMode = .fit
         statusText = "読み込み中…"
 
@@ -395,6 +537,8 @@ final class AppModel {
                 viewMode = .grid
             }
             restoreRatings(for: files)
+            scheduleStackAnalysis()
+            scheduleQualityAnalysis()
         }
     }
 
@@ -480,7 +624,141 @@ final class AppModel {
         keywords.merge(restoredKeywords) { current, _ in current }
     }
 
+    // MARK: - 近接カットの自動スタック
+
+    private func scheduleStackAnalysis() {
+        stackAnalysisGeneration += 1
+        let requestedGeneration = stackAnalysisGeneration
+        stackAnalysisTask?.cancel()
+        guard autoStackNearbyShots, !files.isEmpty else {
+            photoStacks = []
+            expandedStackIDs = []
+            return
+        }
+
+        var seen = Set<URL>()
+        let urls = typedFiles.filter { seen.insert($0.deletingPathExtension()).inserted }
+        let provider = captureInfoProvider
+        let thumbnails = thumbnails
+        let assistCache = selectionAssistCache
+        stackAnalysisTask = Task { [weak self] in
+            var candidates: [StackCandidate] = []
+            var updates: [URL: AssistCacheEntry] = [:]
+            for url in urls {
+                guard !Task.isCancelled, let fingerprint = FileFingerprint.read(from: url)
+                else { return }
+                let cached = await assistCache.entry(for: url, fingerprint: fingerprint)
+                let entry: AssistCacheEntry
+                if let cached {
+                    entry = cached
+                } else {
+                    let info = await provider.info(for: url)
+                    let thumbnail = await thumbnails.image(for: url)
+                    entry = AssistCacheEntry(
+                        fingerprint: fingerprint,
+                        capturedAt: ExifDateParser.parse(info?.capture.dateTimeOriginal)?
+                            .timeIntervalSince1970,
+                        sequenceNumber: PhotoStackAnalyzer.sequenceNumber(in: url),
+                        perceptualHash: thumbnail.flatMap {
+                            ThumbnailAnalysis.perceptualHash(of: $0.cgImage)
+                        },
+                        quality: nil)
+                    updates[url] = entry
+                }
+                candidates.append(
+                    StackCandidate(
+                        url: url,
+                        capturedAt: entry.capturedAt.map(Date.init(timeIntervalSince1970:)),
+                        sequenceNumber: entry.sequenceNumber,
+                        perceptualHash: entry.perceptualHash))
+            }
+            await assistCache.update(updates)
+            guard !Task.isCancelled else { return }
+            let stacks = PhotoStackAnalyzer.makeStacks(candidates: candidates)
+            self?.applyPhotoStacks(stacks, generation: requestedGeneration)
+        }
+    }
+
+    private func applyPhotoStacks(_ stacks: [PhotoStack], generation: Int) {
+        guard generation == stackAnalysisGeneration, autoStackNearbyShots else { return }
+        photoStacks = stacks
+        expandedStackIDs.formIntersection(stacks.map(\.id))
+    }
+
+    // MARK: - 技術品質解析
+
+    private func scheduleQualityAnalysis(after delay: Duration = .milliseconds(700)) {
+        qualityAnalysisGeneration += 1
+        let requestedGeneration = qualityAnalysisGeneration
+        qualityAnalysisTask?.cancel()
+        guard analyzeTechnicalQuality, !files.isEmpty else {
+            qualityByURL = [:]
+            return
+        }
+
+        let urls = typedFiles
+        let provider = captureInfoProvider
+        let thumbnails = thumbnails
+        let assistCache = selectionAssistCache
+        qualityAnalysisTask = Task(priority: .background) { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            var updates: [URL: AssistCacheEntry] = [:]
+            for url in urls {
+                guard !Task.isCancelled, let fingerprint = FileFingerprint.read(from: url)
+                else { return }
+                let cached = await assistCache.entry(for: url, fingerprint: fingerprint)
+                if let metrics = cached?.quality {
+                    self?.applyQualityMetrics(
+                        metrics, for: url, generation: requestedGeneration)
+                    continue
+                }
+
+                guard let thumbnail = await thumbnails.image(for: url) else { continue }
+                let metrics = await Task.detached(priority: .background) {
+                    ThumbnailAnalysis.qualityMetrics(of: thumbnail.cgImage)
+                }.value
+                guard !Task.isCancelled, let metrics else { return }
+                let info = await provider.info(for: url)
+                let entry = AssistCacheEntry(
+                    fingerprint: fingerprint,
+                    capturedAt: cached?.capturedAt
+                        ?? ExifDateParser.parse(info?.capture.dateTimeOriginal)?
+                            .timeIntervalSince1970,
+                    sequenceNumber: cached?.sequenceNumber
+                        ?? PhotoStackAnalyzer.sequenceNumber(in: url),
+                    perceptualHash: cached?.perceptualHash
+                        ?? ThumbnailAnalysis.perceptualHash(of: thumbnail.cgImage),
+                    quality: metrics)
+                updates[url] = entry
+                self?.applyQualityMetrics(
+                    metrics, for: url, generation: requestedGeneration)
+            }
+            await assistCache.update(updates)
+        }
+    }
+
+    private func applyQualityMetrics(
+        _ metrics: QualityMetrics, for url: URL, generation: Int
+    ) {
+        guard generation == qualityAnalysisGeneration, analyzeTechnicalQuality,
+            files.contains(url)
+        else { return }
+        qualityByURL[url] = metrics
+    }
+
+    private func pauseQualityAnalysisForInteraction() {
+        guard analyzeTechnicalQuality else { return }
+        qualityAnalysisTask?.cancel()
+        scheduleQualityAnalysis(after: .milliseconds(900))
+    }
+
     func navigate(_ delta: Int) {
+        pauseQualityAnalysisForInteraction()
+        if viewMode == .comparison {
+            navigateComparisonCandidate(delta)
+            return
+        }
         let visible = visibleFiles
         guard !visible.isEmpty else { return }
         let newIndex = min(max(currentIndex + delta, 0), visible.count - 1)
@@ -519,6 +797,22 @@ final class AppModel {
         loadCurrent()
     }
 
+    private func navigateComparisonCandidate(_ delta: Int) {
+        guard comparisonURLs.count >= 2 else { return }
+        let visible = visibleFiles
+        guard let current = visible.firstIndex(of: comparisonURLs[1]) else { return }
+        var candidate = min(max(current + delta, 0), visible.count - 1)
+        if visible[candidate] == comparisonURLs[0] {
+            candidate = min(max(candidate + delta, 0), visible.count - 1)
+        }
+        guard visible[candidate] != comparisonURLs[1], visible[candidate] != comparisonURLs[0]
+        else { return }
+        let winner = comparisonURLs[0]
+        comparisonURLs = [winner, visible[candidate]]
+        comparisonFrames = comparisonFrames.filter { $0.key == winner }
+        loadComparisonFrames(fullResolution: zoomMode == .actualSize)
+    }
+
     /// フィルムストリップ等からの任意位置ジャンプ。
     /// 隣接位置ならホットミラーの高速経路がそのまま効く
     func jumpTo(_ index: Int) {
@@ -540,38 +834,154 @@ final class AppModel {
 
     /// グリッド: 上下キーで1行分移動
     func moveSelectionVertically(_ rows: Int) {
-        guard viewMode == .grid, !visibleFiles.isEmpty else { return }
-        let newIndex = min(max(currentIndex + rows * gridColumns, 0), visibleFiles.count - 1)
-        currentIndex = newIndex
+        let grid = gridVisibleFiles
+        guard viewMode == .grid, !grid.isEmpty else { return }
+        let selectedGridIndex = currentURL.flatMap { grid.firstIndex(of: $0) } ?? 0
+        let newIndex = min(max(selectedGridIndex + rows * gridColumns, 0), grid.count - 1)
+        if let visibleIndex = visibleFiles.firstIndex(of: grid[newIndex]) {
+            currentIndex = visibleIndex
+        }
     }
 
     func select(_ index: Int) {
         guard visibleFiles.indices.contains(index) else { return }
+        gridSelection.removeAll(keepingCapacity: true)
         currentIndex = index
+        gridSelectionAnchor = visibleFiles[index]
+    }
+
+    func selectGridItem(_ url: URL, command: Bool, shift: Bool) {
+        let grid = gridVisibleFiles
+        guard let index = grid.firstIndex(of: url),
+            let visibleIndex = visibleFiles.firstIndex(of: url)
+        else { return }
+        if shift, let anchor = gridSelectionAnchor,
+            let anchorIndex = grid.firstIndex(of: anchor)
+        {
+            let range = min(anchorIndex, index) ... max(anchorIndex, index)
+            gridSelection.formUnion(range.map { grid[$0] })
+        } else if command {
+            if gridSelection.isEmpty, let selected = currentURL, selected != url {
+                gridSelection.insert(selected)
+            }
+            if !gridSelection.insert(url).inserted { gridSelection.remove(url) }
+            gridSelectionAnchor = url
+        } else {
+            gridSelection.removeAll(keepingCapacity: true)
+            gridSelectionAnchor = url
+        }
+        currentIndex = visibleIndex
     }
 
     /// グリッドから1枚表示へ
     func openSelected() {
         guard !visibleFiles.isEmpty else { return }
         viewMode = .single
+        gridSelection.removeAll(keepingCapacity: true)
         loadCurrent()
     }
 
-    /// 1枚表示からグリッドへ
+    /// 1枚表示・比較表示からグリッドへ
     func showGrid() {
-        guard viewMode == .single else { return }
+        guard viewMode != .grid else { return }
         viewMode = .grid
         zoomMode = .fit
+        comparisonURLs = []
+        comparisonFrames = [:]
     }
 
-    /// Z / Space（1枚表示時）: fit ⇔ 100%等倍
+    /// Z / Space: fit ⇔ 100%等倍
     func toggleZoom() {
-        guard viewMode == .single else { return }
+        guard viewMode != .grid else { return }
         zoomMode = zoomMode == .fit ? .actualSize : .fit
-        renderView?.setZoomMode(zoomMode)
-        if zoomMode == .actualSize {
+        if viewMode == .comparison {
+            comparisonLeftView?.setZoomMode(zoomMode)
+            comparisonRightView?.setZoomMode(zoomMode)
+            if zoomMode == .actualSize { loadComparisonFrames(fullResolution: true) }
+        } else {
+            renderView?.setZoomMode(zoomMode)
+        }
+        if viewMode == .single, zoomMode == .actualSize {
             ensureFullResolution()
         }
+    }
+
+    func beginComparison() {
+        let selected = visibleFiles.filter { gridSelection.contains($0) }
+        let candidates: [URL]
+        if selected.count >= 2 {
+            candidates = Array(selected.prefix(2))
+        } else if visibleFiles.indices.contains(currentIndex),
+            visibleFiles.indices.contains(currentIndex + 1)
+        {
+            candidates = [visibleFiles[currentIndex], visibleFiles[currentIndex + 1]]
+        } else {
+            statusText = "比較する写真を2枚選択してください"
+            return
+        }
+        beginComparison(with: candidates)
+    }
+
+    func beginComparison(with urls: [URL]) {
+        let candidates = Array(urls.prefix(2))
+        guard candidates.count == 2 else {
+            statusText = "比較する写真を2枚選択してください"
+            return
+        }
+        comparisonURLs = candidates
+        comparisonFrames = [:]
+        zoomMode = .fit
+        viewMode = .comparison
+        gridSelection.removeAll(keepingCapacity: true)
+        loadComparisonFrames(fullResolution: false)
+    }
+
+    /// A/Bの勝者を残し、表示順で次の候補との比較へ進む。
+    func chooseComparisonWinner(slot: Int) {
+        guard comparisonURLs.indices.contains(slot) else { return }
+        let winner = comparisonURLs[slot]
+        let visible = visibleFiles
+        let furthestIndex = comparisonURLs.compactMap { visible.firstIndex(of: $0) }.max() ?? -1
+        guard visible.indices.contains(furthestIndex + 1) else {
+            statusText = "最後の候補です（勝者: \(winner.lastPathComponent)）"
+            return
+        }
+        comparisonURLs = [winner, visible[furthestIndex + 1]]
+        comparisonFrames = comparisonFrames.filter { $0.key == winner }
+        statusText = ""
+        loadComparisonFrames(fullResolution: zoomMode == .actualSize)
+    }
+
+    private func loadComparisonFrames(fullResolution: Bool) {
+        let requestedURLs = comparisonURLs
+        let targetPixels = displayTargetPixels
+        let cache = cache
+        for url in requestedURLs where comparisonFrames[url] == nil
+            || (fullResolution && comparisonFrames[url]?.frame.isFullResolution != true)
+        {
+            Task { [weak self] in
+                guard
+                    let frame = try? await cache.value(
+                        for: FrameKey(url: url, full: fullResolution),
+                        loader: {
+                            let cpu = try fullResolution
+                                ? ImagePipeline.loadFullResolutionFrame(from: url)
+                                : ImagePipeline.loadDisplayFrame(
+                                    from: url, displayTarget: targetPixels)
+                            return try TextureFactory.makeFrame(from: cpu)
+                        })
+                else { return }
+                self?.installComparisonFrame(frame, for: url, expecting: requestedURLs)
+            }
+        }
+    }
+
+    private func installComparisonFrame(
+        _ frame: TextureFrame, for url: URL, expecting urls: [URL]
+    ) {
+        guard viewMode == .comparison, comparisonURLs == urls else { return }
+        generation += 1
+        comparisonFrames[url] = PresentedFrame(generation: generation, frame: frame)
     }
 
     /// 表示中フレームがフル解像でなければ（M262のハーフサイズ）、
@@ -630,53 +1040,80 @@ final class AppModel {
         LibrarySelection.pairedURLs(of: url, in: files)
     }
 
+    private var metadataTargetURLs: [URL] {
+        if viewMode == .grid, !gridSelection.isEmpty {
+            return visibleFiles.filter { gridSelection.contains($0) }
+        }
+        return currentURL.map { [$0] } ?? []
+    }
+
+    private var metadataShotTargets: [(imageURL: URL, memberURLs: [URL])] {
+        var seen = Set<URL>()
+        return metadataTargetURLs.compactMap { url in
+            let base = url.deletingPathExtension()
+            guard seen.insert(base).inserted else { return nil }
+            return (url, pairURLs(of: url))
+        }
+    }
+
     /// カラーラベルを適用（同じ色を再指定でトグル解除）してサイドカーへ書き込み
     private func applyLabel(_ label: String) {
-        guard let url = currentURL else { return }
-        let new: String? = labels[url] == label ? nil : label
-        for member in pairURLs(of: url) {
-            if let new {
-                labels[member] = new
-            } else {
-                labels.removeValue(forKey: member)
-            }
+        let targets = metadataShotTargets
+        guard let url = targets.first?.imageURL else { return }
+        let advanceDestination = targets.count == 1 ? nextURLForAutoAdvance() : nil
+        let clear = targets.allSatisfy { labels[$0.imageURL] == label }
+        let new: String? = clear ? nil : label
+        let edits = targets.compactMap { target -> MetadataEdit? in
+            let before = labels[target.imageURL]
+            guard before != new else { return nil }
+            return MetadataEdit(
+                imageURL: target.imageURL, memberURLs: target.memberURLs,
+                before: .label(before), after: .label(new))
         }
-        let revision = nextXMPWriteRevision()
-        let writer = xmpWriter
-        Task(priority: .utility) { [weak self] in
-            do {
-                let applied = try await writer.writeLabel(
-                    new, forImageAt: url, revision: revision)
-                if applied { self?.finishXMPWrite(revision: revision) }
-            } catch {
-                self?.reportXMPError(error, for: url, revision: revision)
-            }
-        }
+        applyNewMetadataTransaction(edits, focusURL: url)
+        if targets.count == 1 { autoAdvance(from: url, to: advanceDestination) }
     }
 
     /// レートを適用してXMPサイドカーへ非同期書き込み。除外(-1)は再指定でトグル解除
     private func applyRating(_ rating: Int) {
-        guard let url = currentURL else { return }
-        let current = ratings[url] ?? 0
-        let new = (rating == -1 && current == -1) ? 0 : rating
-        guard new != current else { return }
-        for member in pairURLs(of: url) {
-            ratings[member] = new
+        let targets = metadataShotTargets
+        guard let url = targets.first?.imageURL else { return }
+        let advanceDestination = targets.count == 1 ? nextURLForAutoAdvance() : nil
+        let clearRejected = rating == -1 && targets.allSatisfy {
+            (ratings[$0.imageURL] ?? 0) == -1
         }
+        let new = clearRejected ? 0 : rating
+        let edits = targets.compactMap { target -> MetadataEdit? in
+            let before = ratings[target.imageURL] ?? 0
+            guard before != new else { return nil }
+            return MetadataEdit(
+                imageURL: target.imageURL, memberURLs: target.memberURLs,
+                before: .rating(before), after: .rating(new))
+        }
+        guard !edits.isEmpty else { return }
+        applyNewMetadataTransaction(edits, focusURL: url)
+        if targets.count == 1 { autoAdvance(from: url, to: advanceDestination) }
+    }
 
-        let revision = nextXMPWriteRevision()
-        let writer = xmpWriter
-        Task(priority: .utility) { [weak self] in
-            do {
-                let applied = try await writer.writeRating(
-                    new,
-                    forImageAt: url,
-                    revision: revision,
-                    createSidecarIfMissing: new != 0)
-                if applied { self?.finishXMPWrite(revision: revision) }
-            } catch {
-                self?.reportXMPError(error, for: url, revision: revision)
-            }
+    private func nextURLForAutoAdvance() -> URL? {
+        let visible = visibleFiles
+        guard visible.indices.contains(currentIndex + 1) else { return nil }
+        return visible[currentIndex + 1]
+    }
+
+    private func autoAdvance(from source: URL, to destination: URL?) {
+        guard autoAdvanceAfterRating else { return }
+        guard let destination else {
+            // 最後の写真では現在位置を維持する。変更でフィルター対象外になった場合も戻す。
+            focus(on: source)
+            return
+        }
+        let visible = visibleFiles
+        if let index = visible.firstIndex(of: destination) {
+            currentIndex = index
+            if viewMode == .single { loadCurrent() }
+        } else {
+            focus(on: destination)
         }
     }
 
@@ -695,6 +1132,107 @@ final class AppModel {
     private func reportXMPError(_ error: any Error, for url: URL, revision: UInt64) {
         guard revision == xmpWriteRevision else { return }
         statusText = "XMP書き込み失敗 (\(url.lastPathComponent)): \(error)"
+    }
+
+    // MARK: - メタデータ Undo / Redo
+
+    private func applyNewMetadataTransaction(_ edits: [MetadataEdit], focusURL: URL) {
+        guard !edits.isEmpty else { return }
+        for edit in edits {
+            applyMetadataValue(edit.after, to: edit.memberURLs)
+            writeMetadataValue(edit.after, for: edit.imageURL)
+        }
+        metadataHistory.record(MetadataTransaction(edits: edits, focusURL: focusURL))
+        updateHistoryAvailability()
+    }
+
+    private func updateHistoryAvailability() {
+        canUndoMetadata = metadataHistory.canUndo
+        canRedoMetadata = metadataHistory.canRedo
+    }
+
+    func undoMetadata() {
+        guard let transaction = metadataHistory.takeUndo() else { return }
+        applyMetadataTransaction(transaction, useAfter: false)
+        updateHistoryAvailability()
+    }
+
+    func redoMetadata() {
+        guard let transaction = metadataHistory.takeRedo() else { return }
+        applyMetadataTransaction(transaction, useAfter: true)
+        updateHistoryAvailability()
+    }
+
+    private func applyMetadataTransaction(
+        _ transaction: MetadataTransaction, useAfter: Bool
+    ) {
+        for edit in transaction.edits {
+            let value = useAfter ? edit.after : edit.before
+            applyMetadataValue(value, to: edit.memberURLs)
+            writeMetadataValue(value, for: edit.imageURL)
+        }
+        if let focusURL = transaction.focusURL { focus(on: focusURL) }
+    }
+
+    private func applyMetadataValue(_ value: MetadataValue, to urls: [URL]) {
+        switch value {
+        case .rating(let rating):
+            for url in urls { ratings[url] = rating }
+        case .label(let label):
+            for url in urls {
+                if let label { labels[url] = label } else { labels.removeValue(forKey: url) }
+            }
+        case .keywords(let updated):
+            for url in urls {
+                if updated.isEmpty {
+                    keywords.removeValue(forKey: url)
+                } else {
+                    keywords[url] = updated
+                }
+            }
+        }
+    }
+
+    private func writeMetadataValue(_ value: MetadataValue, for url: URL) {
+        let revision = nextXMPWriteRevision()
+        let writer = xmpWriter
+        Task(priority: .utility) { [weak self] in
+            do {
+                let applied: Bool
+                switch value {
+                case .rating(let rating):
+                    applied = try await writer.writeRating(
+                        rating, forImageAt: url, revision: revision,
+                        createSidecarIfMissing: rating != 0)
+                case .label(let label):
+                    applied = try await writer.writeLabel(
+                        label, forImageAt: url, revision: revision)
+                case .keywords(let updated):
+                    applied = try await writer.writeKeywords(
+                        updated, forImageAt: url, revision: revision)
+                }
+                if applied { self?.finishXMPWrite(revision: revision) }
+            } catch {
+                self?.reportXMPError(error, for: url, revision: revision)
+            }
+        }
+    }
+
+    private func focus(on url: URL) {
+        if !visibleFiles.contains(url) {
+            var updated = filter
+            updated.evaluation = .all
+            filter = updated
+        }
+        if !visibleFiles.contains(url) {
+            filter = FilterState()
+        }
+        let visible = visibleFiles
+        guard let index = visible.firstIndex(of: url) ?? visible.firstIndex(where: {
+            $0.deletingPathExtension() == url.deletingPathExtension()
+        }) else { return }
+        currentIndex = index
+        if viewMode == .single { loadCurrent() }
     }
 
     // MARK: - エクスポート（⌘E）
