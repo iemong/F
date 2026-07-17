@@ -62,14 +62,14 @@ public actor LRUByteCache<Key: Hashable & Sendable, Value: Sendable> {
             // プリフェッチ中なら本要求に昇格（以後のキャンセル対象から外す）
             prefetching.remove(key)
             do {
-                return try await task.value
+                return try await awaitLoad(key: key, task: task)
             } catch is CancellationError {
                 // キャンセル済みプリフェッチに当たった → 作り直す
             }
         }
 
         let task = startLoad(key: key, prefetch: false, loader: loader)
-        return try await task.value
+        return try await awaitLoad(key: key, task: task)
     }
 
     /// バックグラウンドで先読み。完了を観測できるよう Task を返す
@@ -118,13 +118,37 @@ public actor LRUByteCache<Key: Hashable & Sendable, Value: Sendable> {
     }
 
     private func finalizeLoad(key: Key, task: Task<Value, any Error>) async {
-        let value = try? await task.value
+        do {
+            let value = try await task.value
+            completeLoad(key: key, task: task, value: value)
+        } catch {
+            failLoad(key: key, task: task)
+        }
+    }
+
+    private func awaitLoad(key: Key, task: Task<Value, any Error>) async throws -> Value {
+        do {
+            let value = try await task.value
+            completeLoad(key: key, task: task, value: value)
+            return value
+        } catch {
+            failLoad(key: key, task: task)
+            throw error
+        }
+    }
+
+    private func completeLoad(key: Key, task: Task<Value, any Error>, value: Value) {
         if inflight[key] == task {
             inflight[key] = nil
             prefetching.remove(key)
         }
-        if let value {
-            insert(key: key, value: value)
+        insert(key: key, value: value)
+    }
+
+    private func failLoad(key: Key, task: Task<Value, any Error>) {
+        if inflight[key] == task {
+            inflight[key] = nil
+            prefetching.remove(key)
         }
     }
 
